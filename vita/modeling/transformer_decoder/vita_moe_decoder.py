@@ -64,6 +64,24 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
         version = local_metadata.get("version", None)
+        # ================== 新增：MoE 权重兼容性映射 ==================
+        # 遍历所有可能的层数
+        for i in range(10): 
+            old_k1 = prefix + f"transformer_ffn_layers.{i}.linear1.weight"
+            moe_k1 = prefix + f"transformer_ffn_layers.{i}.moe.experts.0.linear1.weight"
+            
+            # 如果预训练字典里有旧的 linear，但没有 moe，我们主动帮它改名！
+            if old_k1 in state_dict and moe_k1 not in state_dict:
+                state_dict[moe_k1] = state_dict.pop(old_k1)
+                state_dict[prefix + f"transformer_ffn_layers.{i}.moe.experts.0.linear1.bias"] = \
+                    state_dict.pop(prefix + f"transformer_ffn_layers.{i}.linear1.bias")
+                
+                state_dict[prefix + f"transformer_ffn_layers.{i}.moe.experts.0.linear2.weight"] = \
+                    state_dict.pop(prefix + f"transformer_ffn_layers.{i}.linear2.weight")
+                state_dict[prefix + f"transformer_ffn_layers.{i}.moe.experts.0.linear2.bias"] = \
+                    state_dict.pop(prefix + f"transformer_ffn_layers.{i}.linear2.bias")
+                # 提示：你可能会在 log 里看到一两句关于 Router 的 unexpected_keys，那是正常的，因为 Router 本来就是新加的。
+        # =============================================================
         if version is None or version < 2:
             scratch = True
             logger = logging.getLogger(__name__)

@@ -81,6 +81,18 @@ class MoELayer(nn.Module):
         # Convert back to transformer format if needed
         if is_transformer_format:
             output = output.transpose(0, 1)  # [B, N, D] -> [N, B, D]
+            
+        # ================= 新增：防止 DDP 未使用参数报错 =================
+        if self.training:
+            dummy_add = 0.0
+            for expert in self.experts:
+                # 只处理那些需要计算梯度的 active experts
+                for param in expert.parameters():
+                    if param.requires_grad:
+                        dummy_add = dummy_add + param.sum() * 0.0
+            # 强行将未使用的参数绑定到输出的计算图上（数值上加了 0，无影响）
+            output = output + dummy_add
+        # ==============================================================
 
         return output, routing_loss
 
