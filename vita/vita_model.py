@@ -287,9 +287,7 @@ class Vita(nn.Module):
         # bipartite matching-based loss
         losses, fg_indices = self.criterion(outputs, frame_targets)
 
-        # Add routing loss if present
-        if 'routing_loss' in outputs:
-            losses['loss_routing'] = outputs['routing_loss']
+        
 
         vita_outputs = self.vita_module(frame_queries)
         vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features)
@@ -303,6 +301,10 @@ class Vita(nn.Module):
                 # remove this loss if not specified in `weight_dict`
                 losses.pop(k)
         vita_loss_dict = self.vita_criterion(vita_outputs, clip_targets, frame_targets, fg_indices)
+        # 将 routing_loss 加到 vita_loss_dict 中，以避开上面的 pop 机制
+        if 'routing_loss' in outputs:
+            vita_loss_dict['loss_routing'] = outputs['routing_loss']
+        # ====================================================================
         vita_weight_dict = self.vita_criterion.weight_dict
 
         for k in vita_loss_dict.keys():

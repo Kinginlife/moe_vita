@@ -75,7 +75,8 @@ class MaskFormerDistillation(BaseDistillation):
 
         weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight,
                        "loss_dice": dice_weight, "loss_kd": self.kd_weight, "loss_mask_kd": cfg.CONT.DIST.MASK_KD,
-                       "loss_pod": cfg.CONT.DIST.POD_WEIGHT * (self.new_classes / self.num_classes)**0.5}
+                       "loss_pod": cfg.CONT.DIST.POD_WEIGHT * (self.new_classes / self.num_classes)**0.5,
+                       "loss_routing": 1.0}
 
         if deep_supervision:
             dec_layers = cfg.MODEL.MASK_FORMER.DEC_LAYERS
@@ -187,6 +188,10 @@ class MaskFormerDistillation(BaseDistillation):
 
         if self.pod_weight > 0:
             losses.update(pod_loss(model_out, model_out_old))
+            # ==================== 新增：拯救被丢弃的 Routing Loss ====================
+        if 'routing_loss' in outputs and outputs['routing_loss'] is not None:
+            losses['loss_routing'] = outputs['routing_loss']
+        # =========================================================================
 
         for k in list(losses.keys()):
             if k in self.criterion.weight_dict:
