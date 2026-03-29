@@ -102,6 +102,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
         moe_num_experts: int = 1,
         moe_router_dim: int = 512,
         moe_top_k: int = 1,
+        moe_num_layers: int = 1,
     ):
         super().__init__()
 
@@ -138,8 +139,8 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
                 )
             )
 
-            # Last layer uses MoE, others use standard FFN
-            if i == self.num_layers - 1:
+            # Use MoE for last N layers, standard FFN for others
+            if i >= self.num_layers - moe_num_layers:
                 self.transformer_ffn_layers.append(
                     MoEFFNLayer(
                         d_model=hidden_dim,
@@ -209,6 +210,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
         ret["moe_num_experts"] = cfg.MOE.NUM_EXPERTS
         ret["moe_router_dim"] = cfg.MOE.ROUTER_DIM
         ret["moe_top_k"] = cfg.MOE.TOP_K
+        ret["moe_num_layers"] = cfg.MOE.NUM_MOE_LAYERS
 
         return ret
 
@@ -230,13 +232,8 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
         _, bs, _ = src[0].shape
 
         # Prepare task_id tensor for MoE
-        if task_id is None and self.training:
-            # Get from config during training
-            import torch
-            task_id = torch.zeros(bs, dtype=torch.long, device=src[0].device)
-        elif task_id is not None and not isinstance(task_id, torch.Tensor):
+        if task_id is not None and not isinstance(task_id, torch.Tensor):
             # Convert scalar to tensor
-            import torch
             task_id = torch.full((bs,), task_id, dtype=torch.long, device=src[0].device)
 
         query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
@@ -270,8 +267,8 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
                 query_pos=query_embed
             )
 
-            # FFN: last layer uses MoE
-            if i == self.num_layers - 1:
+            # FFN: check if this layer uses MoE
+            if isinstance(self.transformer_ffn_layers[i], MoEFFNLayer):
                 output, routing_loss = self.transformer_ffn_layers[i](output, task_id)
                 if routing_loss is not None:
                     routing_losses.append(routing_loss)

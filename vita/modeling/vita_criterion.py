@@ -303,6 +303,10 @@ class VitaSetCriterion(nn.Module):
                 )
             )
 
+        # Add MoE routing loss if present
+        if "routing_loss" in outputs:
+            losses["loss_routing"] = outputs["routing_loss"]
+
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):

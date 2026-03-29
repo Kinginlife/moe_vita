@@ -464,15 +464,15 @@ def build_augmentation(cfg, is_train):
 
         else:
             min_size = cfg.INPUT.MIN_SIZE_TRAIN
-            max_size = cfg.INPUT.MAX_SIZE_TRAIN
-            sample_style = cfg.INPUT.MIN_SIZE_TRAIN_SAMPLING
+            max_size = cfg.INPUT.MAX_SIZE_TRAIN #MIN_SIZE_TRAIN: (288, 320, 352, 384, 416, 448, 480, 512)  MAX_SIZE_TRAIN: 768
+            sample_style = cfg.INPUT.MIN_SIZE_TRAIN_SAMPLING #"choice_by_clip"
             clip_frame_cnt = cfg.INPUT.SAMPLING_FRAME_NUM if "by_clip" in cfg.INPUT.MIN_SIZE_TRAIN_SAMPLING else 1
 
             # Crop
             if cfg.INPUT.CROP.ENABLED:
                 crop_aug = RandomApplyClip(
                     T.AugmentationList([
-                        ResizeShortestEdgeClip([400, 500, 600], 1333, sample_style, clip_frame_cnt=clip_frame_cnt),
+                        ResizeShortestEdgeClip([400, 500, 600], 1333, sample_style, clip_frame_cnt=clip_frame_cnt),#先把 clip 缩放到短边 400/500/600（随机选一个），长边限制 1333。
                         RandomCropClip(cfg.INPUT.PSEUDO.CROP.TYPE, cfg.INPUT.PSEUDO.CROP.SIZE, clip_frame_cnt=clip_frame_cnt)
                     ]),
                     clip_frame_cnt=clip_frame_cnt

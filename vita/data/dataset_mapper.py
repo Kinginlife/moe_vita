@@ -151,6 +151,9 @@ class YTVISDatasetMapper:
         num_classes: int = 40,
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
+        #task_id: int,
+        #base_classes: int,
+        #incremental_classes: int,
     ):
         """
         NOTE: this interface is experimental.
@@ -343,6 +346,9 @@ class CocoClipDatasetMapper:
         sampling_frame_range: int = 5,
         src_dataset_name: str = "",
         tgt_dataset_name: str = "",
+        #task_id: int,
+        #base_classes: int,
+        #incremental_classes: int,
     ):
         """
         NOTE: this interface is experimental.
@@ -361,7 +367,9 @@ class CocoClipDatasetMapper:
 
         if not is_tgt:
             self.src_metadata = MetadataCatalog.get(src_dataset_name)
+            #print(src_dataset_name)
             self.tgt_metadata = MetadataCatalog.get(tgt_dataset_name)
+            #print(tgt_dataset_name)
             if tgt_dataset_name.startswith("ytvis_2019"):
                 src2tgt = COCO_TO_YTVIS_2019
             elif tgt_dataset_name.startswith("ytvis_2021"):
@@ -381,6 +389,8 @@ class CocoClipDatasetMapper:
         logger = logging.getLogger(__name__)
         mode = "training" if is_train else "inference"
         logger.info(f"[DatasetMapper] Augmentations used in {mode}: {augmentations}")
+
+
 
     @classmethod
     def from_config(cls, cfg, is_train: bool = True, is_tgt: bool = True):

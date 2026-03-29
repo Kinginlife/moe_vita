@@ -3,7 +3,7 @@ try:
     from shapely.errors import ShapelyDeprecationWarning
     import warnings
     warnings.filterwarnings('ignore', category=ShapelyDeprecationWarning)
-except:
+except ImportError:
     pass
 
 import copy
@@ -49,13 +49,11 @@ from vita import (
     add_vita_config,
 )
 from vita.continual_config import add_continual_config
-from vita.data.builtin_continual import (
-    register_all_ytvis_2019_incremental,
-    register_all_ytvis_2021_incremental,
-    register_all_ovis_incremental,
-    register_all_coco_video_incremental,
-)
+from detectron2.data import DatasetCatalog, MetadataCatalog
 
+from vita.data.datasets.builtin import register_all_coco_video, register_all_ytvis_2019, register_all_ytvis_2021, register_all_ovis
+
+from vita.data.datasets.builtin import register_all_ytvis_2019_val, register_all_ytvis_2021_val, register_all_ovis_val
 logger = logging.getLogger("detectron2")
 
 
@@ -69,18 +67,37 @@ class Trainer(DefaultTrainer):
         model = super().build_model(cfg)
 
         # Handle MoE expert management for incremental tasks
-        if cfg.MOE.ENABLED and cfg.CONT.TASK > 0:
+        if cfg.MOE.ENABLED:
             try:
                 decoder = model.sem_seg_head.predictor
-                moe_layer = decoder.transformer_ffn_layers[-1].moe
+                # Get all MoE layers
+                moe_layers = [layer for layer in decoder.transformer_ffn_layers
+                             if hasattr(layer, 'moe')]
 
-                # Freeze old experts
-                if cfg.MOE.FREEZE_OLD_EXPERTS:
-                    old_expert_ids = list(range(cfg.CONT.TASK))
-                    moe_layer.freeze_experts(old_expert_ids)
-                    logger.info(f"Frozen experts: {old_expert_ids}")
-            except AttributeError:
-                logger.warning("MoE layer not found in model")
+                for moe_layer_wrapper in moe_layers:
+                    moe_layer = moe_layer_wrapper.moe
+                    current_num_experts = len(moe_layer.experts)
+                    expected_num_experts = cfg.CONT.TASK + 1  # Task 0 -> 1 expert, Task 1 -> 2 experts, etc.
+
+                    # Add new expert if needed
+                    if current_num_experts < expected_num_experts:
+                        init_from = cfg.CONT.TASK - 1 if cfg.MOE.INIT_FROM_PREVIOUS and cfg.CONT.TASK > 0 else None
+                        moe_layer.add_expert(
+                            cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
+                            cfg.MODEL.MASK_FORMER.DIM_FEEDFORWARD,
+                            dropout=0.0,
+                            init_from=init_from
+                        )
+                        logger.info(f"Task {cfg.CONT.TASK}: Added expert {current_num_experts} (total: {expected_num_experts})")
+
+                    # Freeze old experts (exclude current task expert)
+                    if cfg.MOE.FREEZE_OLD_EXPERTS and cfg.CONT.TASK > 0:
+                        old_expert_ids = list(range(cfg.CONT.TASK))
+                        moe_layer.freeze_experts(old_expert_ids)
+                        logger.info(f"Frozen old experts: {old_expert_ids}")
+            except AttributeError as e:
+                logger.error(f"MoE layer not found in model: {e}")
+                raise
 
         return model
 
@@ -116,19 +133,19 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_train_loader(cls, cfg):
-        # Register incremental datasets if continual learning is enabled
-        if hasattr(cfg, 'CONT') and cfg.CONT.TASK >= 0:
-            _root = os.getenv("DETECTRON2_DATASETS", "datasets")
-            try:
-                register_all_ytvis_2019_incremental(_root, cfg, train=True)
-                register_all_ytvis_2021_incremental(_root, cfg, train=True)
-                register_all_ovis_incremental(_root, cfg, train=True)
-                register_all_coco_video_incremental(_root, cfg, train=True)
-            except Exception as e:
-                logger.warning(f"Failed to register incremental datasets: {e}")
+        #print(model)
+        try:  #使用detectron2使用数据集用DatasetCatalog.get(dataset_name)获取数据,所以要先把数据集注册到DatasetCatalog
+            _root_data = os.getenv("DETECTRON2_DATASETS", "datasets")
+            register_all_ovis(_root_data, cfg, train=True)
+            register_all_ytvis_2019(_root_data, cfg, train=True)
+            register_all_ytvis_2021(_root_data, cfg, train=True)
+            register_all_coco_video(_root_data, cfg)
+        except:
+            pass
 
         mappers = []
         for d_i, dataset_name in enumerate(cfg.DATASETS.TRAIN):
+            print(dataset_name)
             if dataset_name.startswith('coco'):
                 mappers.append(
                     CocoClipDatasetMapper(
@@ -147,21 +164,26 @@ class Trainer(DefaultTrainer):
             mapper = mappers[0]
             return build_detection_train_loader(cfg, mapper=mapper, dataset_name=cfg.DATASETS.TRAIN[0])
         else:
-            loaders = [
-                build_detection_train_loader(cfg, mapper=mapper, dataset_name=dataset_name)
-                for mapper, dataset_name in zip(mappers, cfg.DATASETS.TRAIN)
-            ]
-            combined_data_loader = build_combined_loader(cfg, loaders, cfg.DATASETS.DATASET_RATIO)
-            return combined_data_loader
 
-    @classmethod
-    def build_test_loader(cls, cfg, dataset_name):
-        dataset_name = cfg.DATASETS.TEST[0]
-        if dataset_name.startswith('coco'):
-            mapper = CocoClipDatasetMapper(cfg, is_train=False)
-        elif dataset_name.startswith('ytvis') or dataset_name.startswith('ovis'):
-            mapper = YTVISDatasetMapper(cfg, is_train=False)
-        return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+            loaders = []
+            for mapper, dataset_name in zip(mappers, cfg.DATASETS.TRAIN):
+                dataset = DatasetCatalog.get(dataset_name)
+                if len(dataset) == 0:
+                    print(dataset_name, 'is empty')
+                else:
+                    loader = build_detection_train_loader(cfg, mapper=mapper, dataset_name=dataset_name)
+                    loaders.append(loader)
+
+            if len(loaders) > 1:
+                #loaders = [
+                    #build_detection_train_loader(cfg, mapper=mapper, dataset_name=dataset_name)
+                    #for mapper, dataset_name in zip(mappers, cfg.DATASETS.TRAIN)
+                #]
+                combined_data_loader = build_combined_loader(cfg, loaders, cfg.DATASETS.DATASET_RATIO)
+                return combined_data_loader
+
+            else:
+                return loader
 
     @classmethod
     def build_lr_scheduler(cls, cfg, optimizer):
@@ -253,6 +275,29 @@ class Trainer(DefaultTrainer):
         return optimizer
 
     @classmethod
+    def build_test_loader(cls, cfg, dataset_name):
+
+        try:
+            _root_data = os.getenv("DETECTRON2_DATASETS", "datasets")
+            #register_all_ovis(_root_data, cfg, train=False)
+            #register_all_ytvis_2019(_root_data, cfg, train=False)
+            #register_all_ytvis_2021(_root_data, cfg, train=False)
+            #register_all_coco_video(_root_data, cfg)
+            register_all_ytvis_2019_val(_root_data, cfg, train=False)
+            register_all_ytvis_2021_val(_root_data, cfg, train=False)
+            register_all_ovis_val(_root_data, cfg, train=False)
+        
+        except:
+            pass
+
+        dataset_name = cfg.DATASETS.TEST[0]
+        if dataset_name.startswith('coco'):
+            mapper = CocoClipDatasetMapper(cfg, is_train=False)
+        elif dataset_name.startswith('ytvis') or dataset_name.startswith('ovis'):
+            mapper = YTVISDatasetMapper(cfg, is_train=False)
+        
+        return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+    @classmethod
     def test(cls, cfg, model, evaluators=None):
         """
         Evaluate the given model with continual learning result saving.
@@ -336,13 +381,6 @@ def setup(args):
 def main(args):
     cfg = setup(args)
 
-    # Update MoE config based on task
-    if cfg.MOE.ENABLED:
-        cfg.defrost()
-        cfg.MOE.NUM_EXPERTS = cfg.CONT.TASK + 1
-        cfg.freeze()
-        logger.info(f"Task {cfg.CONT.TASK}: Using {cfg.MOE.NUM_EXPERTS} experts")
-
     if args.eval_only:
         model = Trainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
@@ -357,6 +395,12 @@ def main(args):
 
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
+
+    # Set task_id for MoE if enabled
+    if cfg.MOE.ENABLED and hasattr(cfg, 'CONT'):
+        trainer.model.set_task_id(cfg.CONT.TASK)
+        logger.info(f"Set model task_id to {cfg.CONT.TASK}")
+
     return trainer.train()
 
 

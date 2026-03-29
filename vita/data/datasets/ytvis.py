@@ -147,7 +147,7 @@ def _get_ytvis_2021_instances_meta():
     return ret
 
 
-def load_ytvis_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
+def load_ytvis_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None, cfg=None, train=False):
     from .ytvis_api.ytvos import YTVOS
 
     timer = Timer()
@@ -226,15 +226,50 @@ Category ids in annotations are not in [1, #categories]! We'll apply a mapping f
         video_id = record["video_id"] = vid_dict["id"]
 
         video_objs = []
+
+        #############################################################
+        if train:  #训练模式
+            base_classes_dataset = []
+            for base_classes_anno in anno_dict_list:
+                if cfg.CONT.TASK == 0:  #第一个任务
+                    #只留下基础类别
+                    if (base_classes_anno["category_id"]-1) < cfg.CONT.BASE_CLS:
+                        base_classes_dataset.append(base_classes_anno)
+                else:
+                    #只留下当前任务的类别
+                    if cfg.CONT.BASE_CLS + (cfg.CONT.TASK - 1) * cfg.CONT.INC_CLS <= (base_classes_anno["category_id"]-1) < cfg.CONT.BASE_CLS + cfg.CONT.TASK * cfg.CONT.INC_CLS:
+                        base_classes_dataset.append(base_classes_anno)
+
+            if len(base_classes_dataset) == 0: #如果当前任务没有类别，则跳过
+               continue
+        else:
+            base_classes_dataset = anno_dict_list  #其他模式下不进行类别过滤
+        ######################################################################################
+
         for frame_idx in range(record["length"]):
             frame_objs = []
-            for anno in anno_dict_list:
+            for anno in base_classes_dataset:  #anno_dict_list:
+
                 assert anno["video_id"] == video_id
 
                 obj = {key: anno[key] for key in ann_keys if key in anno}
 
+
+                    #############################################
+                #if cfg.CONT.TASK == 0:
+                    #if (obj["category_id"]-1) >= cfg.CONT.BASE_CLS:
+                        #frame_objs.append(obj)
+                        #continue
+                #else:
+                    #if (obj["category_id"]-1) < cfg.CONT.BASE_CLS + (cfg.CONT.TASK - 1) * cfg.CONT.INC_CLS or (obj["category_id"]-1) >= cfg.CONT.BASE_CLS + cfg.CONT.TASK * cfg.CONT.INC_CLS:
+                        #frame_objs.append(obj)
+                        #continue
+                #########################################################
+
+
                 _bboxes = anno.get("bboxes", None)
                 _segm = anno.get("segmentations", None)
+
 
                 if not (_bboxes and _segm and _bboxes[frame_idx] and _segm[frame_idx]):
                     continue
@@ -259,10 +294,25 @@ Category ids in annotations are not in [1, #categories]! We'll apply a mapping f
 
                 if id_map:
                     obj["category_id"] = id_map[obj["category_id"]]
+
+                    #############################################
+                #if cfg.CONT.TASK == 0:
+                    #if obj["category_id"] < cfg.CONT.BASE_CLS:
+                        #frame_objs.append(obj)
+                #else:
+                    #if cfg.CONT.BASE_CLS + (cfg.CONT.TASK - 1) * cfg.CONT.INC_CLS <= obj["category_id"] < cfg.CONT.BASE_CLS + cfg.CONT.TASK * cfg.CONT.INC_CLS:
+                        #frame_objs.append(obj)
+
+                #########################################################
+
                 frame_objs.append(obj)
+            #if len(frame_objs) > 0:
             video_objs.append(frame_objs)
+
+        #if len(video_objs) > 0:
         record["annotations"] = video_objs
         dataset_dicts.append(record)
+
 
     if num_instances_without_valid_segmentation > 0:
         logger.warning(
@@ -275,7 +325,7 @@ Category ids in annotations are not in [1, #categories]! We'll apply a mapping f
     return dataset_dicts
 
 
-def register_ytvis_instances(name, metadata, json_file, image_root):
+def register_ytvis_instances(name, metadata, json_file, image_root, cfg=None, train=False,):
     """
     Register a dataset in YTVIS's json annotation format for
     instance tracking.
@@ -290,11 +340,11 @@ def register_ytvis_instances(name, metadata, json_file, image_root):
     assert isinstance(name, str), name
     assert isinstance(json_file, (str, os.PathLike)), json_file
     assert isinstance(image_root, (str, os.PathLike)), image_root
-    # 1. register a function which returns dicts
-    DatasetCatalog.register(name, lambda: load_ytvis_json(json_file, image_root, name))
+    # 1. register a function which returns dicts  注册数据加载函数到 DatasetCatalog
+    DatasetCatalog.register(name, lambda: load_ytvis_json(json_file, image_root, name, cfg=cfg, train=train))
 
     # 2. Optionally, add metadata about this dataset,
-    # since they might be useful in evaluation, visualization or logging
+    # since they might be useful in evaluation, visualization or logging  2. 设置元数据到 MetadataCatalog
     MetadataCatalog.get(name).set(
         json_file=json_file, image_root=image_root, evaluator_type="ytvis", **metadata
     )

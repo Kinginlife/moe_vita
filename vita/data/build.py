@@ -91,7 +91,10 @@ def get_detection_dataset_dicts(
     assert len(dataset_names)
     dataset_dicts = [DatasetCatalog.get(dataset_name) for dataset_name in dataset_names]
     for dataset_name, dicts in zip(dataset_names, dataset_dicts):
-        assert len(dicts), "Dataset '{}' is empty!".format(dataset_name)
+        assert len(dicts), "Dataset '{}' is empty!".format(dataset_name)   #########################################
+        #if len(dicts) == 0:
+            #return dataset_dicts
+
 
     if proposal_files is not None:
         assert len(dataset_names) == len(proposal_files)
@@ -113,7 +116,7 @@ def get_detection_dataset_dicts(
 
 def build_combined_loader(cfg: CfgNode, loaders: Collection[Loader], ratios: Sequence[float]):
     images_per_worker = _compute_num_images_per_worker(cfg)
-    return CombinedDataLoader(loaders, images_per_worker, ratios)
+    return CombinedDataLoader(loaders, images_per_worker, ratios) #vita/data/combined_loader.py
 
 
 def _train_loader_from_config(cfg, mapper, dataset_name=None, *, dataset=None, sampler=None):
@@ -145,7 +148,7 @@ def _train_loader_from_config(cfg, mapper, dataset_name=None, *, dataset=None, s
 
 # TODO can allow dataset as an iterable or IterableDataset to make this function more general
 @configurable(from_config=_train_loader_from_config)
-def build_detection_train_loader(
+def build_detection_train_loader(  #将原始数据集转换为训练用的 DataLoader
     dataset, *, mapper, sampler=None, total_batch_size, aspect_ratio_grouping=True, num_workers=0
 ):
     """
@@ -198,7 +201,7 @@ def _test_loader_from_config(cfg, dataset_name, mapper=None):
     """
     dataset = get_detection_dataset_dicts(
         [dataset_name],
-        filter_empty=False,
+        filter_empty=False,    ############ contiual learing is True
         proposal_files=[
             cfg.DATASETS.PROPOSAL_FILES_TEST[list(cfg.DATASETS.TEST).index(dataset_name)]
         ]

@@ -10,9 +10,10 @@ import torch.nn.functional as F
 class Router(nn.Module):
     """Router network that learns to select experts."""
 
-    def __init__(self, d_model, num_experts, router_dim=512):
+    def __init__(self, d_model, num_experts, router_dim=512, soft_temp=2.0):
         super().__init__()
         self.num_experts = num_experts
+        self.soft_temp = soft_temp
         self.network = nn.Sequential(
             nn.Linear(d_model, router_dim),
             nn.ReLU(),
@@ -36,6 +37,11 @@ class Router(nn.Module):
 
         routing_loss = None
         if self.training and task_id is not None:
-            routing_loss = F.cross_entropy(router_logits, task_id)
+            # Soft supervision: encourage but don't force routing to task_id
+            target_probs = F.one_hot(task_id, self.num_experts).float()
+            # Add temperature to soften the target
+            target_probs = target_probs * (1 - 0.1) + 0.1 / self.num_experts
+            router_probs = F.log_softmax(router_logits / self.soft_temp, dim=-1)
+            routing_loss = F.kl_div(router_probs, target_probs, reduction='batchmean')
 
         return router_logits, routing_loss

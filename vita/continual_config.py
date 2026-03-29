@@ -47,3 +47,5 @@ def add_continual_config(cfg):
     cfg.MOE.ROUTING_LOSS_WEIGHT = 0.1   # Weight for routing loss
     cfg.MOE.FREEZE_OLD_EXPERTS = True   # Freeze old experts in incremental tasks
     cfg.MOE.INIT_FROM_PREVIOUS = True   # Initialize new expert from previous
+    cfg.MOE.NUM_MOE_LAYERS = 1          # Number of decoder layers with MoE (from last)
+    cfg.MOE.SOFT_ROUTING_TEMP = 2.0     # Temperature for soft routing supervision

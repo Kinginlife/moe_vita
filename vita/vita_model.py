@@ -96,6 +96,9 @@ class Vita(nn.Module):
         self.is_multi_cls = is_multi_cls
         self.apply_cls_thres = apply_cls_thres
 
+        # Store task_id for MoE
+        self.task_id = None
+
         if freeze_detector:
             for name, p in self.named_parameters():
                 if not "vita_module" in name:
@@ -104,6 +107,10 @@ class Vita(nn.Module):
         self.test_interpolate_chunk_size = test_interpolate_chunk_size
 
         self.is_coco = is_coco
+
+    def set_task_id(self, task_id):
+        """Set task_id for MoE routing."""
+        self.task_id = task_id
 
     @classmethod
     def from_config(cls, cfg):
@@ -169,6 +176,8 @@ class Vita(nn.Module):
         }
         if sim_weight > 0.0:
             vita_weight_dict["loss_vita_sim"] = sim_weight
+        if cfg.MOE.ENABLED:
+            vita_weight_dict["loss_routing"] = cfg.MOE.ROUTING_LOSS_WEIGHT
 
         if vita_deep_supervision:
             vita_dec_layers = cfg.MODEL.VITA.DEC_LAYERS
@@ -267,7 +276,7 @@ class Vita(nn.Module):
         T = self.num_frames if self.training else BT 
         B = BT // T
 
-        outputs, frame_queries, mask_features = self.sem_seg_head(features)
+        outputs, frame_queries, mask_features = self.sem_seg_head(features, task_id=self.task_id)
 
         mask_features = self.vita_module.vita_mask_features(mask_features)
         mask_features = mask_features.view(B, self.num_frames, *mask_features.shape[-3:])
@@ -277,6 +286,10 @@ class Vita(nn.Module):
 
         # bipartite matching-based loss
         losses, fg_indices = self.criterion(outputs, frame_targets)
+
+        # Add routing loss if present
+        if 'routing_loss' in outputs:
+            losses['loss_routing'] = outputs['routing_loss']
 
         vita_outputs = self.vita_module(frame_queries)
         vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features)

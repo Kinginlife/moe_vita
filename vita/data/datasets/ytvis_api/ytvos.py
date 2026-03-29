@@ -68,9 +68,10 @@ class YTVOS:
         anns, cats, vids = {}, {}, {}
         vidToAnns,catToVids = defaultdict(list),defaultdict(list)
         if 'annotations' in self.dataset:
-            for ann in self.dataset['annotations']:
-                vidToAnns[ann['video_id']].append(ann)
-                anns[ann['id']] = ann
+            if self.dataset['annotations'] != None:   ###########################################
+                for ann in self.dataset['annotations']:
+                    vidToAnns[ann['video_id']].append(ann)
+                    anns[ann['id']] = ann
 
         if 'videos' in self.dataset:
             for vid in self.dataset['videos']:
@@ -81,8 +82,9 @@ class YTVOS:
                 cats[cat['id']] = cat
 
         if 'annotations' in self.dataset and 'categories' in self.dataset:
-            for ann in self.dataset['annotations']:
-                catToVids[ann['category_id']].append(ann['video_id'])
+            if self.dataset['annotations'] != None:  ###########################################
+                for ann in self.dataset['annotations']:
+                    catToVids[ann['category_id']].append(ann['video_id'])
 
         print('index created!')
 
