@@ -1,0 +1,3 @@
+from .vita_mask2former_transformer_decoder import VitaMultiScaleMaskedTransformerDecoder
+from .vita_moe_decoder import VitaMoEMultiScaleMaskedTransformerDecoder
+
