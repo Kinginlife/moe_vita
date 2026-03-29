@@ -27,12 +27,18 @@ class MoELayer(nn.Module):
     def forward(self, x, task_id=None):
         """
         Args:
-            x: [B, N, d_model] input features
+            x: [N, B, d_model] (transformer format) or [B, N, d_model]
             task_id: [B] or scalar optional task IDs for training supervision
         Returns:
-            output: [B, N, d_model]
+            output: same shape as x
             routing_loss: scalar or None
         """
+        # Handle transformer format [N, B, D] -> [B, N, D]
+        is_transformer_format = False
+        if x.dim() == 3 and x.size(1) < x.size(0):
+            x = x.transpose(0, 1)  # [N, B, D] -> [B, N, D]
+            is_transformer_format = True
+
         B, N, D = x.shape
 
         # Get query-level routing logits [B, N, num_experts]
@@ -49,7 +55,6 @@ class MoELayer(nn.Module):
             for expert_id in range(self.num_experts):
                 mask = expert_ids == expert_id  # [B, N]
                 if mask.any():
-                    indices = mask.nonzero(as_tuple=False)  # [num_selected, 2]
                     selected_x = x[mask]  # [num_selected, D]
                     expert_output = self.experts[expert_id](selected_x)
                     output[mask] = expert_output.to(x.dtype)
@@ -62,16 +67,20 @@ class MoELayer(nn.Module):
             for expert_id in range(self.num_experts):
                 mask = (topk_indices == expert_id).any(dim=-1)  # [B, N]
                 if mask.any():
-                    indices = mask.nonzero(as_tuple=False)
                     selected_x = x[mask]
                     expert_output = self.experts[expert_id](selected_x).to(x.dtype)
 
                     # Apply weights
+                    indices = mask.nonzero(as_tuple=False)
                     for idx, (b, n) in enumerate(indices):
                         k_positions = (topk_indices[b, n] == expert_id).nonzero(as_tuple=True)[0]
                         for k_pos in k_positions:
                             weight = topk_weights[b, n, k_pos]
                             output[b, n] += weight * expert_output[idx]
+
+        # Convert back to transformer format if needed
+        if is_transformer_format:
+            output = output.transpose(0, 1)  # [B, N, D] -> [N, B, D]
 
         return output, routing_loss
 
