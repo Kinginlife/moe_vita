@@ -18,7 +18,7 @@ MODEL:
     COMMON_STRIDE: 4
     TRANSFORMER_ENC_LAYERS: 6
   MASK_FORMER:
-    TRANSFORMER_DECODER_NAME: "VitaMultiScaleMaskedTransformerDecoder"
+    TRANSFORMER_DECODER_NAME: "VitaMoEMultiScaleMaskedTransformerDecoder"
     TRANSFORMER_IN_FEATURE: "multi_scale_pixel_decoder"
     DEEP_SUPERVISION: True
     NO_OBJECT_WEIGHT: 0.1
@@ -118,11 +118,12 @@ CONT:
 
 # MoE Configuration
 MOE:
-  ENABLED: False
+  ENABLED: True
   NUM_EXPERTS: 1
   ROUTER_DIM: 512
   TOP_K: 1
-  ROUTING_LOSS_WEIGHT: 0.1
+  ROUTING_LOSS_WEIGHT: 0.5
   FREEZE_OLD_EXPERTS: True
   INIT_FROM_PREVIOUS: True
+  NUM_MOE_LAYERS: 1
 

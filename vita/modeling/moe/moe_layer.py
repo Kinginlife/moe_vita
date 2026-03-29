@@ -52,7 +52,7 @@ class MoELayer(nn.Module):
                     batch_indices = mask.nonzero(as_tuple=True)[0]
                     expert_input = x[batch_indices]
                     expert_output = self.experts[expert_id](expert_input)
-                    output[batch_indices] = expert_output
+                    output[batch_indices] = expert_output.to(x.dtype)
         else:
             # Top-K: weighted combination
             topk_weights, topk_indices = torch.topk(router_logits, actual_k, dim=-1)
@@ -64,7 +64,7 @@ class MoELayer(nn.Module):
                 if mask.any():
                     batch_indices = mask.nonzero(as_tuple=True)[0]
                     expert_input = x[batch_indices]
-                    expert_output = self.experts[expert_id](expert_input)
+                    expert_output = self.experts[expert_id](expert_input).to(x.dtype)
 
                     for idx, b_idx in enumerate(batch_indices):
                         k_positions = (topk_indices[b_idx] == expert_id).nonzero(as_tuple=True)[0]

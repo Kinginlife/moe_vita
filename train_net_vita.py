@@ -398,7 +398,8 @@ def main(args):
 
     # Set task_id for MoE if enabled
     if cfg.MOE.ENABLED and hasattr(cfg, 'CONT'):
-        trainer.model.set_task_id(cfg.CONT.TASK)
+        model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
+        model.set_task_id(cfg.CONT.TASK)
         logger.info(f"Set model task_id to {cfg.CONT.TASK}")
 
     return trainer.train()
