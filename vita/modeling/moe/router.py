@@ -17,7 +17,7 @@ class Router(nn.Module):
         self.network = nn.Sequential(
             nn.Linear(d_model, router_dim),
             nn.ReLU(),
-            nn.Linear(router_dim, num_experts)
+            nn.Linear(router_dim, num_experts, bias=False)
         )
         self.old_expert_mask = 0  # Number of old experts to freeze
         self._register_gradient_hook()
@@ -30,7 +30,7 @@ class Router(nn.Module):
             return grad
 
         self.network[-1].weight.register_hook(hook)
-        self.network[-1].bias.register_hook(hook)
+        
 
     def forward(self, x, task_id=None):
         """
@@ -48,7 +48,21 @@ class Router(nn.Module):
         # Query-level routing: keep [B, N, D] shape
         B, N, D = x.shape
         x_flat = x.reshape(B * N, D)  # [B*N, D]
-        router_logits = self.network(x_flat)  # [B*N, num_experts]
+        #router_logits = self.network(x_flat)  # [B*N, num_experts]
+        # ================== 🔥 核心：余弦路由机制 🔥 ==================
+        # 1. 过冻结的隐藏层提取特征
+        features = self.network[:-1](x_flat)  # 过 Linear -> ReLU
+        
+        # 2. 获取最后一层的权重
+        last_weight = self.network[-1].weight  # 形状: [num_experts, router_dim]
+        
+        # 3. 对特征和权重进行 L2 归一化 (彻底粉碎模长作弊)
+        f_norm = F.normalize(features, p=2, dim=-1)
+        w_norm = F.normalize(last_weight, p=2, dim=-1)
+        
+        # 4. 计算余弦相似度 [-1, 1]，并放大 20 倍 (为了让 Softmax 能产生有效梯度)
+        router_logits = F.linear(f_norm, w_norm) * 20.0
+        # ==============================================================
         router_logits = router_logits.reshape(B, N, self.num_experts)  # [B, N, num_experts]
 
         routing_loss = None

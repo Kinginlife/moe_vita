@@ -19,7 +19,7 @@ ITER_BASE=10000
 MOE_ARGS="MOE.ENABLED True \
           MOE.ROUTER_DIM 512 \
           MOE.TOP_K 1 \
-          MOE.ROUTING_LOSS_WEIGHT 0.5 \
+          MOE.ROUTING_LOSS_WEIGHT 5.0 \
           MOE.FREEZE_OLD_EXPERTS True \
           MOE.INIT_FROM_PREVIOUS True \
           MOE.NUM_MOE_LAYERS 1 \
@@ -44,11 +44,11 @@ INC_ARGS_0="CONT.TASK 0 \
             MOE.NUM_EXPERTS 1"
 
 echo ">>> Training Task 0 (Base)"
-python train_net_vita.py --num-gpus ${NGPUS} \
-    --dist-url tcp://127.0.0.1:50164 \
-    --config-file ${CFG_FILE} \
-    OUTPUT_DIR ${OUT_DIR_0} \
-    ${COMM_ARGS} ${INC_ARGS_0}
+# python train_net_vita.py --num-gpus ${NGPUS} \
+#     --dist-url tcp://127.0.0.1:50164 \
+#     --config-file ${CFG_FILE} \
+#     OUTPUT_DIR ${OUT_DIR_0} \
+#     ${COMM_ARGS} ${INC_ARGS_0}
 
 
 # ==========================================
@@ -75,6 +75,7 @@ python train_net_vita.py --num-gpus ${NGPUS} \
     --config-file ${CFG_FILE} \
     OUTPUT_DIR ${OUT_DIR_1} \
     CONT.WEIGHTS ${PRETRAINED_PATH} \
+    TEST.EVAL_PERIOD 100 \
     CONT.TASK 1 \
     MOE.NUM_EXPERTS 2 \
     SOLVER.MAX_ITER ${ITER_INC} \

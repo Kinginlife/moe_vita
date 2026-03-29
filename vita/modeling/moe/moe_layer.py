@@ -125,28 +125,35 @@ class MoELayer(nn.Module):
         # Expand router output layer
         old_linear = self.router.network[-1]
         old_weight = old_linear.weight.data
-        old_bias = old_linear.bias.data
+       
 
-        new_linear = nn.Linear(old_linear.in_features, self.num_experts)
+        new_linear = nn.Linear(old_linear.in_features, self.num_experts,bias=False)
         new_linear = new_linear.to(old_weight.device)
 
         # Copy old weights and FREEZE them
         with torch.no_grad():
             new_linear.weight.data[:old_num_experts] = old_weight
-            new_linear.bias.data[:old_num_experts] = old_bias
+            
 
             # Initialize new expert's router weights
             if init_from is not None and init_from < old_num_experts:
                 new_linear.weight.data[old_num_experts] = old_weight[init_from] + torch.randn_like(old_weight[init_from]) * noise_scale
-                new_linear.bias.data[old_num_experts] = old_bias[init_from] + torch.randn(1, device=old_bias.device).item() * noise_scale
+                
             else:
                 nn.init.xavier_uniform_(new_linear.weight.data[old_num_experts:])
-                nn.init.zeros_(new_linear.bias.data[old_num_experts:])
+                
 
         self.router.network[-1] = new_linear
 
         # Freeze old expert routing weights
+        # Freeze the entire router network except new expert output
+        for param in self.router.network[:-1].parameters():
+            param.requires_grad = False
+
         self.router.network[-1].weight.requires_grad_(True)
-        self.router.network[-1].bias.requires_grad_(True)
+        
+
         # Create mask to freeze old expert weights during backward
         self.router.old_expert_mask = old_num_experts
+        # Re-register gradient hook after replacing the layer
+        self.router._register_gradient_hook()
