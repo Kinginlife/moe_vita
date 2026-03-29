@@ -19,48 +19,62 @@ class Router(nn.Module):
             nn.ReLU(),
             nn.Linear(router_dim, num_experts)
         )
+        self.old_expert_mask = 0  # Number of old experts to freeze
+        self._register_gradient_hook()
+
+    def _register_gradient_hook(self):
+        """Register hook to zero out gradients for old expert weights."""
+        def hook(grad):
+            if self.old_expert_mask > 0:
+                grad[:self.old_expert_mask] = 0
+            return grad
+
+        self.network[-1].weight.register_hook(hook)
+        self.network[-1].bias.register_hook(hook)
 
     def forward(self, x, task_id=None):
         """
         Args:
-            x: [B, N, d_model] or [B, d_model] or [N, B, d_model] (transformer format)
-            task_id: scalar or [B] optional task IDs for training supervision
+            x: [B, N, d_model] or [N, B, d_model] (transformer format)
+            task_id: scalar or [B] or [B, N] optional task IDs for training supervision
         Returns:
-            router_logits: [B, num_experts]
+            router_logits: [B, N, num_experts] (query-level routing)
             routing_loss: scalar or None
         """
         # Handle transformer format [N, B, D] -> [B, N, D]
         if x.dim() == 3 and x.size(1) < x.size(0):
             x = x.transpose(0, 1)  # [N, B, D] -> [B, N, D]
 
-        # Global pooling if input is [B, N, d_model]
-        if x.dim() == 3:
-            x = x.mean(dim=1)  # [B, d_model]
-
-        router_logits = self.network(x)  # [B, num_experts]
-        batch_size = router_logits.size(0)
+        # Query-level routing: keep [B, N, D] shape
+        B, N, D = x.shape
+        x_flat = x.reshape(B * N, D)  # [B*N, D]
+        router_logits = self.network(x_flat)  # [B*N, num_experts]
+        router_logits = router_logits.reshape(B, N, self.num_experts)  # [B, N, num_experts]
 
         routing_loss = None
         if self.training:
             if task_id is not None:
                 # Convert scalar task_id to tensor if needed
                 if not isinstance(task_id, torch.Tensor):
-                    task_id = torch.full((batch_size,), task_id, dtype=torch.long, device=x.device)
-                elif task_id.dim() == 0:  # scalar tensor
-                    task_id = task_id.unsqueeze(0).expand(batch_size)
-                elif task_id.size(0) != batch_size:
-                    # Expand if size mismatch
-                    task_id = task_id[0].unsqueeze(0).expand(batch_size)
+                    task_id = torch.full((B,), task_id, dtype=torch.long, device=x.device)
+                elif task_id.dim() == 0:
+                    task_id = task_id.unsqueeze(0).expand(B)
+                elif task_id.size(0) != B:
+                    task_id = task_id[0].unsqueeze(0).expand(B)
 
-                # Soft supervision: encourage but don't force routing to task_id
-                target_probs = F.one_hot(task_id, self.num_experts).float()
-                # Add temperature to soften the target
+                # Expand to [B, N] if needed
+                if task_id.dim() == 1:
+                    task_id = task_id.unsqueeze(1).expand(B, N)  # [B, N]
+
+                # Soft supervision at query level
+                target_probs = F.one_hot(task_id, self.num_experts).float()  # [B, N, num_experts]
                 target_probs = target_probs * (1 - 0.1) + 0.1 / self.num_experts
                 router_probs = F.log_softmax(router_logits / self.soft_temp, dim=-1)
-                routing_loss = F.kl_div(router_probs, target_probs, reduction='batchmean')
+                routing_loss = F.kl_div(router_probs.reshape(-1, self.num_experts),
+                                       target_probs.reshape(-1, self.num_experts),
+                                       reduction='batchmean')
             else:
-                # Ensure router parameters always get gradients even without task_id
-                # Use entropy regularization to encourage balanced expert usage
+                # Entropy regularization
                 router_probs = F.softmax(router_logits, dim=-1)
                 routing_loss = -(router_probs * torch.log(router_probs + 1e-8)).sum(dim=-1).mean() * 0.01
 

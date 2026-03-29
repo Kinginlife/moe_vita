@@ -28,49 +28,50 @@ class MoELayer(nn.Module):
         """
         Args:
             x: [B, N, d_model] input features
-            task_id: [B] optional task IDs for training supervision
+            task_id: [B] or scalar optional task IDs for training supervision
         Returns:
             output: [B, N, d_model]
             routing_loss: scalar or None
         """
         B, N, D = x.shape
 
-        # Get routing logits
-        router_logits, routing_loss = self.router(x, task_id)  # [B, num_experts]
+        # Get query-level routing logits [B, N, num_experts]
+        router_logits, routing_loss = self.router(x, task_id)
 
-        # Use router to select experts (both training and inference)
+        # Top-K routing per query
         actual_k = min(self.top_k, self.num_experts)
 
         if actual_k == 1:
-            # Top-1: batch by expert for efficiency
-            expert_ids = router_logits.argmax(dim=-1)  # [B]
+            # Top-1: select best expert per query
+            expert_ids = router_logits.argmax(dim=-1)  # [B, N]
             output = torch.zeros_like(x)
 
             for expert_id in range(self.num_experts):
-                mask = expert_ids == expert_id
+                mask = expert_ids == expert_id  # [B, N]
                 if mask.any():
-                    batch_indices = mask.nonzero(as_tuple=True)[0]
-                    expert_input = x[batch_indices]
-                    expert_output = self.experts[expert_id](expert_input)
-                    output[batch_indices] = expert_output.to(x.dtype)
+                    indices = mask.nonzero(as_tuple=False)  # [num_selected, 2]
+                    selected_x = x[mask]  # [num_selected, D]
+                    expert_output = self.experts[expert_id](selected_x)
+                    output[mask] = expert_output.to(x.dtype)
         else:
-            # Top-K: weighted combination
+            # Top-K: weighted combination per query
             topk_weights, topk_indices = torch.topk(router_logits, actual_k, dim=-1)
-            topk_weights = F.softmax(topk_weights, dim=-1)  # [B, actual_k]
+            topk_weights = F.softmax(topk_weights, dim=-1)  # [B, N, K]
 
             output = torch.zeros_like(x)
             for expert_id in range(self.num_experts):
-                mask = (topk_indices == expert_id).any(dim=-1)
+                mask = (topk_indices == expert_id).any(dim=-1)  # [B, N]
                 if mask.any():
-                    batch_indices = mask.nonzero(as_tuple=True)[0]
-                    expert_input = x[batch_indices]
-                    expert_output = self.experts[expert_id](expert_input).to(x.dtype)
+                    indices = mask.nonzero(as_tuple=False)
+                    selected_x = x[mask]
+                    expert_output = self.experts[expert_id](selected_x).to(x.dtype)
 
-                    for idx, b_idx in enumerate(batch_indices):
-                        k_positions = (topk_indices[b_idx] == expert_id).nonzero(as_tuple=True)[0]
+                    # Apply weights
+                    for idx, (b, n) in enumerate(indices):
+                        k_positions = (topk_indices[b, n] == expert_id).nonzero(as_tuple=True)[0]
                         for k_pos in k_positions:
-                            weight = topk_weights[b_idx, k_pos]
-                            output[b_idx] += weight * expert_output[idx]
+                            weight = topk_weights[b, n, k_pos]
+                            output[b, n] += weight * expert_output[idx]
 
         return output, routing_loss
 
@@ -108,18 +109,23 @@ class MoELayer(nn.Module):
         new_linear = nn.Linear(old_linear.in_features, self.num_experts)
         new_linear = new_linear.to(old_weight.device)
 
-        # Copy old weights
+        # Copy old weights and FREEZE them
         with torch.no_grad():
             new_linear.weight.data[:old_num_experts] = old_weight
             new_linear.bias.data[:old_num_experts] = old_bias
 
-            # Initialize new expert's router weights from previous expert with small noise
+            # Initialize new expert's router weights
             if init_from is not None and init_from < old_num_experts:
                 new_linear.weight.data[old_num_experts] = old_weight[init_from] + torch.randn_like(old_weight[init_from]) * noise_scale
                 new_linear.bias.data[old_num_experts] = old_bias[init_from] + torch.randn(1, device=old_bias.device).item() * noise_scale
             else:
-                # Random initialization for new expert
                 nn.init.xavier_uniform_(new_linear.weight.data[old_num_experts:])
                 nn.init.zeros_(new_linear.bias.data[old_num_experts:])
 
         self.router.network[-1] = new_linear
+
+        # Freeze old expert routing weights
+        self.router.network[-1].weight.requires_grad_(True)
+        self.router.network[-1].bias.requires_grad_(True)
+        # Create mask to freeze old expert weights during backward
+        self.router.old_expert_mask = old_num_experts
