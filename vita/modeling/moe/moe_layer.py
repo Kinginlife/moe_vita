@@ -24,11 +24,11 @@ class MoELayer(nn.Module):
         # Router network
         self.router = Router(d_model, num_experts, router_dim, soft_temp)
 
-    def forward(self, x, task_id=None):
+    def forward(self, x, routing_targets=None):
         """
         Args:
             x: [N, B, d_model] (transformer format) or [B, N, d_model]
-            task_id: [B] or scalar optional task IDs for training supervision
+            routing_targets: dict with routing supervision info or None
         Returns:
             output: same shape as x
             routing_loss: scalar or None
@@ -42,10 +42,13 @@ class MoELayer(nn.Module):
         B, N, D = x.shape
 
         # Get query-level routing logits [B, N, num_experts]
-        router_logits, routing_loss = self.router(x, task_id)
+        router_logits, routing_loss = self.router(x, routing_targets)
 
-        # Top-K routing per query
-        actual_k = min(self.top_k, self.num_experts)
+        # Top-K routing: Top-2 for training, Top-1 for inference
+        if self.training:
+            actual_k = min(2, self.num_experts)
+        else:
+            actual_k = 1
 
         if actual_k == 1:
             # Top-1: select best expert per query
@@ -81,18 +84,15 @@ class MoELayer(nn.Module):
         # Convert back to transformer format if needed
         if is_transformer_format:
             output = output.transpose(0, 1)  # [B, N, D] -> [N, B, D]
-            
-        # ================= 新增：防止 DDP 未使用参数报错 =================
+
+        # Prevent DDP unused parameter error
         if self.training:
             dummy_add = 0.0
             for expert in self.experts:
-                # 只处理那些需要计算梯度的 active experts
                 for param in expert.parameters():
                     if param.requires_grad:
                         dummy_add = dummy_add + param.sum() * 0.0
-            # 强行将未使用的参数绑定到输出的计算图上（数值上加了 0，无影响）
             output = output + dummy_add
-        # ==============================================================
 
         return output, routing_loss
 

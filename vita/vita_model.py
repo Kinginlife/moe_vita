@@ -52,6 +52,8 @@ class Vita(nn.Module):
         test_run_chunk_size: int,
         test_interpolate_chunk_size: int,
         is_coco: bool,
+        # MoE
+        cfg=None,
     ):
         """
         Args:
@@ -96,8 +98,14 @@ class Vita(nn.Module):
         self.is_multi_cls = is_multi_cls
         self.apply_cls_thres = apply_cls_thres
 
-        # Store task_id for MoE
+        # Store cfg and task_id for MoE
+        self.cfg = cfg
         self.task_id = None
+
+        # Build class to expert mapping for MoE
+        self.class_to_expert = None
+        if cfg is not None and hasattr(cfg, 'MOE') and cfg.MOE.ENABLED:
+            self.class_to_expert = self._build_class_expert_mapping(cfg)
 
         if freeze_detector:
             for name, p in self.named_parameters():
@@ -111,6 +119,73 @@ class Vita(nn.Module):
     def set_task_id(self, task_id):
         """Set task_id for MoE routing."""
         self.task_id = task_id
+
+    def _build_class_expert_mapping(self, cfg):
+        """
+        Build class to expert mapping for MoE routing.
+        Task 0: classes 0-(BASE_CLS-1) -> expert 0
+        Task 1: classes BASE_CLS-(BASE_CLS+INC_CLS-1) -> expert 1
+        ...
+        """
+        mapping = {}
+        base_cls = cfg.CONT.BASE_CLS
+        inc_cls = cfg.CONT.INC_CLS
+
+        # Base task
+        for c in range(base_cls):
+            mapping[c] = 0
+
+        # Incremental tasks
+        for task_id in range(1, 20):
+            start_cls = base_cls + (task_id - 1) * inc_cls
+            end_cls = start_cls + inc_cls
+            for c in range(start_cls, end_cls):
+                mapping[c] = task_id
+
+        return mapping
+
+    def _generate_routing_targets_from_matching(self, frame_targets, fg_indices, BT):
+        """
+        Generate routing targets based on matching results from Criterion.
+
+        Args:
+            frame_targets: list of dicts with 'labels' [N]
+            fg_indices: list of indices (one per layer), each is list of tuples
+            BT: batch_size * num_frames
+        Returns:
+            routing_targets: dict with 'target_expert_ids' and 'valid_mask'
+        """
+        device = self.device
+        num_queries = self.num_queries
+
+        # Initialize [BT, Q]
+        target_expert_ids = torch.zeros(BT, num_queries, dtype=torch.long, device=device)
+        valid_mask = torch.zeros(BT, num_queries, dtype=torch.bool, device=device)
+
+        # Use the last layer's indices
+        indices = fg_indices[-1] if isinstance(fg_indices, list) else fg_indices
+
+        # For each frame
+        for frame_idx, (pred_idx, tgt_idx) in enumerate(indices):
+            if frame_idx >= BT:
+                break
+
+            # pred_idx: matched query indices [M]
+            # tgt_idx: corresponding GT indices [M]
+            gt_labels = frame_targets[frame_idx]['labels'][tgt_idx]  # [M]
+
+            # Map each matched query to its target expert
+            for query_idx, gt_label in zip(pred_idx, gt_labels):
+                label_val = gt_label.item()
+                if label_val in self.class_to_expert:
+                    expert_id = self.class_to_expert[label_val]
+                    target_expert_ids[frame_idx, query_idx] = expert_id
+                    valid_mask[frame_idx, query_idx] = True
+
+        return {
+            'target_expert_ids': target_expert_ids,
+            'valid_mask': valid_mask,
+        }
 
     @classmethod
     def from_config(cls, cfg):
@@ -225,6 +300,7 @@ class Vita(nn.Module):
             "test_run_chunk_size": cfg.MODEL.VITA.TEST_RUN_CHUNK_SIZE,
             "test_interpolate_chunk_size": cfg.MODEL.VITA.TEST_INTERPOLATE_CHUNK_SIZE,
             "is_coco": cfg.DATASETS.TEST[0].startswith("coco"),
+            "cfg": cfg,
         }
 
     @property
@@ -273,19 +349,38 @@ class Vita(nn.Module):
         features = self.backbone(images.tensor)
 
         BT = len(images)
-        T = self.num_frames if self.training else BT 
+        T = self.num_frames if self.training else BT
         B = BT // T
 
-        outputs, frame_queries, mask_features = self.sem_seg_head(features, task_id=self.task_id)
+        # Prepare targets first
+        frame_targets, clip_targets = self.prepare_targets(batched_inputs, images)
+
+        # First forward without routing targets to get predictions
+        outputs, frame_queries, mask_features = self.sem_seg_head(
+            features, routing_targets=None
+        )
+
+        # Perform matching to get query-to-GT correspondence
+        losses, fg_indices = self.criterion(outputs, frame_targets)
+
+        # Generate routing targets based on matching results
+        routing_targets = None
+        if self.class_to_expert is not None:
+            routing_targets = self._generate_routing_targets_from_matching(
+                frame_targets, fg_indices, BT
+            )
+
+        # Second forward with routing targets to compute routing loss
+        if routing_targets is not None:
+            outputs_with_routing, _, _ = self.sem_seg_head(
+                features, routing_targets=routing_targets
+            )
+            # Extract routing loss
+            if 'routing_loss' in outputs_with_routing:
+                losses['loss_routing'] = outputs_with_routing['routing_loss']
 
         mask_features = self.vita_module.vita_mask_features(mask_features)
         mask_features = mask_features.view(B, self.num_frames, *mask_features.shape[-3:])
-
-        # mask classification target
-        frame_targets, clip_targets = self.prepare_targets(batched_inputs, images)
-
-        # bipartite matching-based loss
-        losses, fg_indices = self.criterion(outputs, frame_targets)
 
         
 
@@ -301,10 +396,6 @@ class Vita(nn.Module):
                 # remove this loss if not specified in `weight_dict`
                 losses.pop(k)
         vita_loss_dict = self.vita_criterion(vita_outputs, clip_targets, frame_targets, fg_indices)
-        # 将 routing_loss 加到 vita_loss_dict 中，以避开上面的 pop 机制
-        if 'routing_loss' in outputs:
-            vita_loss_dict['loss_routing'] = outputs['routing_loss']
-        # ====================================================================
         vita_weight_dict = self.vita_criterion.weight_dict
 
         for k in vita_loss_dict.keys():

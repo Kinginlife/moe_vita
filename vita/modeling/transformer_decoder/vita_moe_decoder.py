@@ -36,22 +36,22 @@ class MoEFFNLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.normalize_before = normalize_before
 
-    def forward_post(self, tgt, task_id=None):
-        tgt2, routing_loss = self.moe(tgt, task_id)
+    def forward_post(self, tgt, routing_targets=None):
+        tgt2, routing_loss = self.moe(tgt, routing_targets)
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
         return tgt, routing_loss
 
-    def forward_pre(self, tgt, task_id=None):
+    def forward_pre(self, tgt, routing_targets=None):
         tgt2 = self.norm(tgt)
-        tgt2, routing_loss = self.moe(tgt2, task_id)
+        tgt2, routing_loss = self.moe(tgt2, routing_targets)
         tgt = tgt + self.dropout(tgt2)
         return tgt, routing_loss
 
-    def forward(self, tgt, task_id=None):
+    def forward(self, tgt, routing_targets=None):
         if self.normalize_before:
-            return self.forward_pre(tgt, task_id)
-        return self.forward_post(tgt, task_id)
+            return self.forward_pre(tgt, routing_targets)
+        return self.forward_post(tgt, routing_targets)
 
 
 @TRANSFORMER_DECODER_REGISTRY.register()
@@ -232,7 +232,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, clip_mask_features, mask=None, task_id=None):
+    def forward(self, x, mask_features, clip_mask_features, mask=None, routing_targets=None):
         assert len(x) == self.num_feature_levels
         src = []
         pos = []
@@ -248,11 +248,6 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
             src[-1] = src[-1].permute(2, 0, 1)
 
         _, bs, _ = src[0].shape
-
-        # Prepare task_id tensor for MoE
-        if task_id is not None and not isinstance(task_id, torch.Tensor):
-            # Convert scalar to tensor
-            task_id = torch.full((bs,), task_id, dtype=torch.long, device=src[0].device)
 
         query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
         output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
@@ -287,7 +282,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
 
             # FFN: check if this layer uses MoE
             if isinstance(self.transformer_ffn_layers[i], MoEFFNLayer):
-                output, routing_loss = self.transformer_ffn_layers[i](output, task_id)
+                output, routing_loss = self.transformer_ffn_layers[i](output, routing_targets)
                 if routing_loss is not None:
                     routing_losses.append(routing_loss)
             else:
