@@ -269,7 +269,7 @@ class VitaSetCriterion(nn.Module):
         if 'routing_targets' not in outputs:
             return {}
 
-        from ..moe.router import Router
+        from vita.modeling.moe.router import Router
 
         router_logits_list = outputs['router_logits']  # List of [B, N, num_experts]
         routing_targets = outputs['routing_targets']
@@ -281,7 +281,7 @@ class VitaSetCriterion(nn.Module):
 
         # Update routing targets based on matched queries
         for batch_idx, (pred_idx, tgt_idx) in enumerate(clip_indices):
-            if batch_idx >= target_expert_ids.size(0):
+            if batch_idx >= target_expert_ids.size(0) or batch_idx >= len(clip_targets):
                 break
 
             gt_labels = clip_targets[batch_idx]['labels'][tgt_idx]

@@ -400,6 +400,11 @@ class Vita(nn.Module):
         
 
         vita_outputs = self.vita_module(frame_queries)
+        # ========= 新增：把 sem_seg_head 产生的路由信息传给 vita_outputs =========
+        if 'router_logits' in outputs:
+            vita_outputs['router_logits'] = outputs['router_logits']
+            vita_outputs['routing_targets'] = outputs.get('routing_targets', None)
+        # =========================================================================
         vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features)
         for out in vita_outputs["aux_outputs"]:
             out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], mask_features)
