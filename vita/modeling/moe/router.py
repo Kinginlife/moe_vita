@@ -133,16 +133,14 @@ class Router(nn.Module):
                 valid_logits = router_logits[valid_mask]
                 valid_targets = target_ids[valid_mask]
 
-                # Soft labels with label smoothing
-                target_probs = F.one_hot(valid_targets, E).float()
-                target_probs = target_probs * 0.9 + 0.1 / E
+                # Special handling for single expert (Task 0)
+                if E == 1:
+                    # Use L2 loss to push logits towards a positive value
+                    # This ensures router learns meaningful features even with 1 expert
+                    target_logits = torch.ones_like(valid_logits) * 5.0
+                    supervised_loss = F.mse_loss(valid_logits, target_logits)
+                else:
+                    # Multi-expert: use cross-entropy
+                    supervised_loss = F.cross_entropy(valid_logits / soft_temp, valid_targets)
 
-                log_probs = F.log_softmax(valid_logits / soft_temp, dim=-1)
-                supervised_loss = F.kl_div(log_probs, target_probs, reduction='batchmean')
-
-        # 2. Entropy regularization
-        router_probs = F.softmax(router_logits, dim=-1)
-        entropy = -(router_probs * torch.log(router_probs + 1e-8)).sum(dim=-1)
-        entropy_loss = -entropy.mean() * 0.01
-
-        return supervised_loss + entropy_loss
+        return supervised_loss

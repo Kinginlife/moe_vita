@@ -43,11 +43,8 @@ class MoELayer(nn.Module):
         # Get query-level routing logits [B, N, num_experts]
         router_logits = self.router(x)
 
-        # Top-K routing: Top-2 for training, Top-1 for inference
-        if self.training:
-            actual_k = min(2, self.num_experts)
-        else:
-            actual_k = 1
+        # Use Top-1 routing for both training and inference (avoid train-test mismatch)
+        actual_k = 1
 
         if actual_k == 1:
             # Top-1: select best expert per query

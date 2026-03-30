@@ -272,12 +272,7 @@ class VitaSetCriterion(nn.Module):
     def loss_routing(self, outputs, clip_targets, clip_indices, num_masks):
         """
         Compute MoE routing loss from collected router logits.
-
-        Args:
-            outputs: dict with 'router_logits' and 'routing_targets'
-            clip_targets: list of target dicts with 'labels'
-            clip_indices: matching indices from matcher
-            num_masks: normalization factor
+        FIXED: Add distillation loss to preserve old expert routing.
         """
         if 'router_logits' not in outputs or not self.moe_enabled:
             return {}
@@ -287,13 +282,12 @@ class VitaSetCriterion(nn.Module):
 
         from vita.modeling.moe.router import Router
 
-        router_logits_list = outputs['router_logits']  # List of [B, N, num_experts]
+        router_logits_list = outputs['router_logits']
         routing_targets = outputs['routing_targets']
         class_to_expert = routing_targets.get('class_to_expert', {})
 
-        # Fill in valid routing targets based on matching results
-        target_expert_ids = routing_targets['target_expert_ids']  # [B, N]
-        valid_mask = routing_targets['valid_mask']  # [B, N]
+        target_expert_ids = routing_targets['target_expert_ids']
+        valid_mask = routing_targets['valid_mask']
 
         # Update routing targets based on matched queries
         for batch_idx, (pred_idx, tgt_idx) in enumerate(clip_indices):
@@ -309,7 +303,7 @@ class VitaSetCriterion(nn.Module):
                     target_expert_ids[batch_idx, query_idx] = expert_id
                     valid_mask[batch_idx, query_idx] = True
 
-        # Compute loss for each layer and average
+        # Compute supervised loss
         total_loss = 0.0
         for router_logits in router_logits_list:
             loss = Router.compute_routing_loss(
@@ -318,6 +312,21 @@ class VitaSetCriterion(nn.Module):
                 self.moe_soft_temp
             )
             total_loss += loss
+
+        # Add distillation loss for unmatched queries (preserve old routing)
+        if self.num_old_classes > 0 and 'old_router_logits' in outputs:
+            old_logits_list = outputs['old_router_logits']
+            for new_logits, old_logits in zip(router_logits_list, old_logits_list):
+                # Only distill on unmatched queries
+                unmatched_mask = ~valid_mask
+                if unmatched_mask.any():
+                    old_probs = F.softmax(old_logits[unmatched_mask] / self.moe_soft_temp, dim=-1)
+                    distill_loss = F.kl_div(
+                        F.log_softmax(new_logits[unmatched_mask] / self.moe_soft_temp, dim=-1),
+                        old_probs.detach(),
+                        reduction='batchmean'
+                    )
+                    total_loss += distill_loss * 0.5
 
         avg_loss = total_loss / len(router_logits_list)
         return {"loss_routing": avg_loss}
