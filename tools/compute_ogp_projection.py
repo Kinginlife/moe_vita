@@ -11,8 +11,12 @@ Usage:
 """
 import argparse
 import os
+import sys
 import torch
 from tqdm import tqdm
+
+# Add parent directory to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from detectron2.config import get_cfg
 from detectron2.data import build_detection_test_loader
@@ -22,13 +26,10 @@ from detectron2.projects.deeplab import add_deeplab_config
 from mask2former import add_maskformer2_config
 from vita import add_vita_config, YTVISDatasetMapper
 from vita.continual_config import add_continual_config
-
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from train_net_vita import Trainer
 
 
-def collect_router_features(model, data_loader, num_samples=1000):
+def collect_router_features(model, data_loader, num_samples=500):
     """Collect router input features from training data."""
     model.eval()
     features_list = []
@@ -47,7 +48,7 @@ def collect_router_features(model, data_loader, num_samples=1000):
     hook = moe_layers[0].moe.router.register_forward_hook(hook_fn)
 
     with torch.no_grad():
-        for idx, inputs in enumerate(tqdm(data_loader, desc="Collecting features")):
+        for idx, inputs in enumerate(tqdm(data_loader, desc="Collecting features", total=num_samples)):
             if idx >= num_samples:
                 break
 
@@ -75,8 +76,8 @@ def main():
     parser.add_argument("--config-file", required=True, help="path to config file")
     parser.add_argument("--task", type=int, default=0, help="task id")
     parser.add_argument("--output-dir", required=True, help="output directory")
-    parser.add_argument("--num-samples", type=int, default=1000, help="number of samples")
-    parser.add_argument("--energy-threshold", type=float, default=0.95, help="energy threshold")
+    parser.add_argument("--num-samples", type=int, default=500, help="number of samples")
+    parser.add_argument("--energy-threshold", type=float, default=0.7, help="energy threshold")
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -95,16 +96,8 @@ def main():
     DetectionCheckpointer(model).load(cfg.MODEL.WEIGHTS)
     model.eval()
 
-    # Build TRAIN data loader (not test!)
-    from vita import YTVISDatasetMapper, CocoClipDatasetMapper
-    dataset_name = cfg.DATASETS.TRAIN[0]
-    if dataset_name.startswith('coco'):
-        mapper = CocoClipDatasetMapper(cfg, is_train=False)
-    else:
-        mapper = YTVISDatasetMapper(cfg, is_train=False)
-
-    from detectron2.data import build_detection_test_loader
-    data_loader = build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+    # Use Trainer's build_train_loader to get properly filtered data
+    data_loader = Trainer.build_train_loader(cfg)
 
     print(f"Collecting features from {args.num_samples} samples...")
     features = collect_router_features(model, data_loader, args.num_samples)

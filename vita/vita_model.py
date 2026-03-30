@@ -120,17 +120,31 @@ class Vita(nn.Module):
         """Set task_id and freeze layers for incremental learning."""
         self.task_id = task_id
 
-        # Freeze bottom layers during incremental learning to prevent feature drift
+        # Freeze ALL layers except last MoE and classifier to prevent feature drift
         if task_id is not None and task_id > 0:
+            # Freeze backbone
             for p in self.backbone.parameters():
                 p.requires_grad = False
-            # Freeze sem_seg_head decoder except last MoE layer
+
+            # Freeze sem_seg_head (pixel decoder, etc.)
+            for name, p in self.sem_seg_head.named_parameters():
+                # Only allow last MoE layer and class_embed to train
+                if 'predictor' not in name:
+                    p.requires_grad = False
+
+            # Freeze decoder except last MoE layer and class_embed
             if hasattr(self.sem_seg_head, 'predictor'):
                 decoder = self.sem_seg_head.predictor
-                for i, layer in enumerate(decoder.transformer_ffn_layers):
-                    if not hasattr(layer, 'moe') or i < len(decoder.transformer_ffn_layers) - 1:
-                        for p in layer.parameters():
-                            p.requires_grad = False
+                for name, p in decoder.named_parameters():
+                    # Allow only: last MoE layer + class_embed
+                    is_last_moe = False
+                    for i, layer in enumerate(decoder.transformer_ffn_layers):
+                        if hasattr(layer, 'moe') and i == len(decoder.transformer_ffn_layers) - 1:
+                            if any(x in name for x in [f'transformer_ffn_layers.{i}', 'class_embed']):
+                                is_last_moe = True
+                                break
+                    if not is_last_moe:
+                        p.requires_grad = False
 
     def _build_class_expert_mapping(self, cfg):
         """

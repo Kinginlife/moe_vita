@@ -120,10 +120,14 @@ class VitaSetCriterion(nn.Module):
         self.moe_enabled = moe_enabled
         self.moe_soft_temp = moe_soft_temp
 
+        # Continual learning: pseudo-labeling for old classes
+        self.num_old_classes = 0
+        self.pseudo_label_threshold = 0.5
+        self.moe_enabled = moe_enabled
+        self.moe_soft_temp = moe_soft_temp
+
     def loss_labels(self, outputs, targets, indices, num_masks):
-        """Classification loss (NLL)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
-        """
+        """Classification loss with pseudo-labeling for old classes to prevent background shift."""
         assert "pred_logits" in outputs
         src_logits = outputs['pred_logits']
         L, B, cQ, _ = src_logits.shape
@@ -135,6 +139,18 @@ class VitaSetCriterion(nn.Module):
             src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
         )
         target_classes[idx] = target_classes_o
+
+        # Pseudo-labeling: rescue high-confidence old class predictions
+        if self.num_old_classes > 0:
+            probs = F.softmax(src_logits, dim=-1)  # [LB, cQ, num_classes+1]
+            old_class_probs, old_class_ids = probs[:, :, :self.num_old_classes].max(dim=-1)
+
+            # Find unmatched queries (currently labeled as background)
+            unmatched_mask = (target_classes == self.num_classes)
+            high_conf_old = (old_class_probs > self.pseudo_label_threshold) & unmatched_mask
+
+            # Assign pseudo labels
+            target_classes[high_conf_old] = old_class_ids[high_conf_old]
 
         loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
         losses = {'loss_vita_ce': loss_ce}

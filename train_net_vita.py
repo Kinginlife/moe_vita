@@ -71,12 +71,16 @@ class Trainer(DefaultTrainer):
             model.set_task_id(cfg.CONT.TASK)
             logger.info(f"Set model task_id to {cfg.CONT.TASK}")
 
-            # Set old classes for classifier freezing
+            # Set old classes for classifier freezing and criterion pseudo-labeling
             if cfg.CONT.TASK > 0:
                 num_old_classes = cfg.CONT.BASE_CLS + (cfg.CONT.TASK - 1) * cfg.CONT.INC_CLS
                 if hasattr(model.sem_seg_head, 'predictor'):
                     model.sem_seg_head.predictor.set_num_old_classes(num_old_classes)
                     logger.info(f"Set num_old_classes to {num_old_classes}")
+                # Set for vita_criterion
+                if hasattr(model, 'vita_criterion'):
+                    model.vita_criterion.num_old_classes = num_old_classes
+                    logger.info(f"Set vita_criterion num_old_classes to {num_old_classes}")
 
         # Handle MoE expert management for incremental tasks
         if cfg.MOE.ENABLED:
