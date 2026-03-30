@@ -44,11 +44,20 @@ INC_ARGS_0="CONT.TASK 0 \
             MOE.NUM_EXPERTS 1"
 
 echo ">>> Training Task 0 (Base)"
-# python train_net_vita.py --num-gpus ${NGPUS} \
-#     --dist-url tcp://127.0.0.1:50164 \
-#     --config-file ${CFG_FILE} \
-#     OUTPUT_DIR ${OUT_DIR_0} \
-#     ${COMM_ARGS} ${INC_ARGS_0}
+python train_net_vita.py --num-gpus ${NGPUS} \
+    --dist-url tcp://127.0.0.1:50164 \
+    --config-file ${CFG_FILE} \
+    OUTPUT_DIR ${OUT_DIR_0} \
+    ${COMM_ARGS} ${INC_ARGS_0}
+
+echo ">>> Computing OGP projection matrix for Task 0"
+python tools/compute_ogp_projection.py \
+    --config-file ${CFG_FILE} \
+    --task 0 \
+    --output-dir ${OUT_DIR_0} \
+    --num-samples 1000 \
+    MODEL.WEIGHTS ${OUT_DIR_0}/model_final.pth \
+    ${COMM_ARGS} ${INC_ARGS_0}
 
 
 # ==========================================
@@ -81,6 +90,17 @@ python train_net_vita.py --num-gpus ${NGPUS} \
     SOLVER.MAX_ITER ${ITER_INC} \
     ${COMM_ARGS_INC} ${FREEZE_ARGS}
 
+echo ">>> Computing OGP projection matrix for Task 1"
+python tools/compute_ogp_projection.py \
+    --config-file ${CFG_FILE} \
+    --task 1 \
+    --output-dir ${OUT_DIR_1} \
+    --num-samples 1000 \
+    MODEL.WEIGHTS ${OUT_DIR_1}/model_final.pth \
+    CONT.TASK 1 \
+    MOE.NUM_EXPERTS 2 \
+    ${COMM_ARGS_INC} ${FREEZE_ARGS}
+
 
 # ==========================================
 # Task 2..10 (Rest Incremental Steps)
@@ -88,11 +108,11 @@ python train_net_vita.py --num-gpus ${NGPUS} \
 for t in {2..10}; do
     num_experts=$((t + 1))
     PREV_TASK=$((t - 1))
-    
+
     # [修改3]: 动态生成当前任务的输出目录，以及上一个任务的权重路径
     CURR_OUT="${OUTPUT_BASE}/step${t}"
     PREV_WEIGHTS="${OUTPUT_BASE}/step${PREV_TASK}/model_final.pth"
-    
+
     echo ">>> Training Task ${t} (Experts: ${num_experts})"
     python train_net_vita.py --num-gpus ${NGPUS} \
         --config-file ${CFG_FILE} \
@@ -101,5 +121,16 @@ for t in {2..10}; do
         CONT.TASK ${t} \
         MOE.NUM_EXPERTS ${num_experts} \
         SOLVER.MAX_ITER ${ITER_INC} \
+        ${COMM_ARGS_INC} ${FREEZE_ARGS}
+
+    echo ">>> Computing OGP projection matrix for Task ${t}"
+    python tools/compute_ogp_projection.py \
+        --config-file ${CFG_FILE} \
+        --task ${t} \
+        --output-dir ${CURR_OUT} \
+        --num-samples 1000 \
+        MODEL.WEIGHTS ${CURR_OUT}/model_final.pth \
+        CONT.TASK ${t} \
+        MOE.NUM_EXPERTS ${num_experts} \
         ${COMM_ARGS_INC} ${FREEZE_ARGS}
 done

@@ -396,11 +396,32 @@ def main(args):
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
 
-    # Set task_id for MoE if enabled
+    # Set task_id and initialize OGP for MoE if enabled
     if cfg.MOE.ENABLED and hasattr(cfg, 'CONT'):
         model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
         model.set_task_id(cfg.CONT.TASK)
         logger.info(f"Set model task_id to {cfg.CONT.TASK}")
+
+        # Initialize OGP for incremental tasks
+        if cfg.CONT.TASK > 0:
+            # Set number of old classes for classifier freezing
+            num_old_classes = cfg.CONT.BASE_CLS + (cfg.CONT.TASK - 1) * cfg.CONT.INC_CLS
+            if hasattr(model.sem_seg_head, 'predictor'):
+                model.sem_seg_head.predictor.set_num_old_classes(num_old_classes)
+                logger.info(f"Set num_old_classes to {num_old_classes}")
+
+            # Load projection matrix from PREVIOUS task
+            prev_task = cfg.CONT.TASK - 1
+            proj_matrix_path = os.path.join(os.path.dirname(cfg.OUTPUT_DIR), f"step{prev_task}", f"projection_matrix_task{prev_task}.pt")
+            if os.path.exists(proj_matrix_path):
+                decoder = model.sem_seg_head.predictor
+                moe_layers = [layer for layer in decoder.transformer_ffn_layers if hasattr(layer, 'moe')]
+                proj_matrix = torch.load(proj_matrix_path, map_location=model.device)
+                for moe_layer_wrapper in moe_layers:
+                    moe_layer_wrapper.moe.router.set_projection_matrix(proj_matrix)
+                logger.info(f"Loaded projection matrix from {proj_matrix_path}")
+            else:
+                logger.warning(f"Projection matrix not found at {proj_matrix_path}")
 
     return trainer.train()
 

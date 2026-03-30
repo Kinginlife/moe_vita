@@ -204,6 +204,31 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
 
         self.vita_last_layer_num = vita_last_layer_num
 
+        # For continual learning: track old classes to freeze
+        self.num_old_classes = 0
+        self._register_class_embed_hook()
+
+    def _register_class_embed_hook(self):
+        """Register gradient hook to freeze old class weights during incremental learning."""
+        def weight_hook(grad):
+            if self.num_old_classes > 0:
+                grad[:self.num_old_classes] = 0
+            return grad
+
+        def bias_hook(grad):
+            if self.num_old_classes > 0:
+                grad[:self.num_old_classes] = 0
+            return grad
+
+        if hasattr(self, 'class_embed'):
+            self.class_embed.weight.register_hook(weight_hook)
+            if self.class_embed.bias is not None:
+                self.class_embed.bias.register_hook(bias_hook)
+
+    def set_num_old_classes(self, num_old_classes):
+        """Set number of old classes to freeze."""
+        self.num_old_classes = num_old_classes
+
     @classmethod
     def from_config(cls, cfg, in_channels, mask_classification):
         ret = {}

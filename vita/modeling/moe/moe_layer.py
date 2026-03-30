@@ -144,15 +144,8 @@ class MoELayer(nn.Module):
 
         self.router.network[-1] = new_linear
 
-        # Freeze old expert routing weights
-        # Freeze the entire router network except new expert output
-        for param in self.router.network[:-1].parameters():
-            param.requires_grad = False
-
-        self.router.network[-1].weight.requires_grad_(True)
-        
-
-        # Create mask to freeze old expert weights during backward
+        # Update mask for orthogonal projection (freeze old experts)
         self.router.old_expert_mask = old_num_experts
+
         # Re-register gradient hook after replacing the layer
         self.router._register_gradient_hook()

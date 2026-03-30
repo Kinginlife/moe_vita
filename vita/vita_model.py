@@ -368,6 +368,18 @@ class Vita(nn.Module):
             return self.inference(batched_inputs[0])
 
     def train_model(self, batched_inputs):
+        # Freeze bottom layers during incremental learning to prevent feature drift
+        if self.task_id is not None and self.task_id > 0:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+            # Freeze sem_seg_head decoder except last MoE layer
+            if hasattr(self.sem_seg_head, 'predictor'):
+                decoder = self.sem_seg_head.predictor
+                for i, layer in enumerate(decoder.transformer_ffn_layers):
+                    if not hasattr(layer, 'moe') or i < len(decoder.transformer_ffn_layers) - 1:
+                        for p in layer.parameters():
+                            p.requires_grad = False
+
         images = []
         for video in batched_inputs:
             for frame in video["image"]:
