@@ -127,7 +127,7 @@ class Router(nn.Module):
         """
         B, N, E = router_logits.shape
 
-        supervised_loss = 0.0
+        supervised_loss = torch.tensor(0.0, device=router_logits.device, dtype=router_logits.dtype)
 
         # 1. Supervised loss (only for positive samples)
         if routing_targets is not None:
@@ -153,14 +153,14 @@ class Router(nn.Module):
 
                 # Prevent new task samples from routing to old experts
                 new_expert_samples = valid_targets_all >= old_expert_mask
-                if new_expert_samples.any():
+                if new_expert_samples.sum() > 0:
                     old_expert_logits = valid_logits_all[new_expert_samples, :old_expert_mask]
                     suppress_new_to_old = -F.logsigmoid(-old_expert_logits).mean()
                     supervised_loss = supervised_loss + suppress_new_to_old * 0.5
 
                 # Prevent old task samples from routing to new experts
                 old_expert_samples = valid_targets_all < old_expert_mask
-                if old_expert_samples.any():
+                if old_expert_samples.sum() > 0:
                     new_expert_logits = valid_logits_all[old_expert_samples, old_expert_mask:]
                     suppress_old_to_new = -F.logsigmoid(-new_expert_logits).mean()
                     supervised_loss = supervised_loss + suppress_old_to_new * 0.5
