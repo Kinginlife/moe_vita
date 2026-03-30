@@ -121,7 +121,6 @@ def main():
 
     router = moe_layers[0].moe.router
 
-    # Load previous projection matrix if exists (for cumulative protection)
     # === 修改后的代码：正确寻找上一个 Task 的文件夹 ===
     if args.task > 0:
         output_base = os.path.dirname(args.output_dir) # 退回到 output/ytvis_2019_moe_hvpl
