@@ -272,7 +272,6 @@ class VitaSetCriterion(nn.Module):
     def loss_routing(self, outputs, clip_targets, clip_indices, num_masks):
         """
         Compute MoE routing loss from collected router logits.
-        FIXED: Add distillation loss to preserve old expert routing.
         """
         if 'router_logits' not in outputs or not self.moe_enabled:
             return {}
@@ -284,27 +283,28 @@ class VitaSetCriterion(nn.Module):
 
         router_logits_list = outputs['router_logits']
         routing_targets = outputs['routing_targets']
-        class_to_expert = routing_targets.get('class_to_expert', {})
 
         target_expert_ids = routing_targets['target_expert_ids']
         valid_mask = routing_targets['valid_mask']
 
-        # Update routing targets based on matched queries
-        for batch_idx, (pred_idx, tgt_idx) in enumerate(clip_indices):
-            if batch_idx >= target_expert_ids.size(0) or batch_idx >= len(clip_targets):
-                break
+        # NOTE: Routing targets are already set in vita_model.py before forward
+        # Do NOT modify them here to avoid DDP inconsistency across GPUs
+        # The following loop is commented out to prevent deadlock
 
-            gt_labels = clip_targets[batch_idx]['labels'][tgt_idx]
-
-            for query_idx, gt_label in zip(pred_idx, gt_labels):
-                label_val = gt_label.item()
-                if label_val in class_to_expert:
-                    expert_id = class_to_expert[label_val]
-                    target_expert_ids[batch_idx, query_idx] = expert_id
-                    valid_mask[batch_idx, query_idx] = True
+        # # Update routing targets based on matched queries
+        # for batch_idx, (pred_idx, tgt_idx) in enumerate(clip_indices):
+        #     if batch_idx >= target_expert_ids.size(0) or batch_idx >= len(clip_targets):
+        #         break
+        #     gt_labels = clip_targets[batch_idx]['labels'][tgt_idx]
+        #     for query_idx, gt_label in zip(pred_idx, gt_labels):
+        #         label_val = gt_label.item()
+        #         if label_val in class_to_expert:
+        #             expert_id = class_to_expert[label_val]
+        #             target_expert_ids[batch_idx, query_idx] = expert_id
+        #             valid_mask[batch_idx, query_idx] = True
 
         # Compute supervised loss
-        total_loss = 0.0
+        total_loss = torch.tensor(0.0, device=target_expert_ids.device, dtype=torch.float32)
         old_expert_mask = routing_targets.get('old_expert_mask', 0)
         for router_logits in router_logits_list:
             loss = Router.compute_routing_loss(
@@ -321,7 +321,9 @@ class VitaSetCriterion(nn.Module):
             for new_logits, old_logits in zip(router_logits_list, old_logits_list):
                 # Only distill on unmatched queries
                 unmatched_mask = ~valid_mask
-                if unmatched_mask.any():
+                num_unmatched = unmatched_mask.sum()
+
+                if num_unmatched > 0:
                     old_probs = F.softmax(old_logits[unmatched_mask] / self.moe_soft_temp, dim=-1)
                     distill_loss = F.kl_div(
                         F.log_softmax(new_logits[unmatched_mask] / self.moe_soft_temp, dim=-1),
@@ -329,6 +331,10 @@ class VitaSetCriterion(nn.Module):
                         reduction='batchmean'
                     )
                     total_loss += distill_loss * 0.5
+                else:
+                    # Add zero loss to maintain gradient graph consistency across processes
+                    distill_loss = (new_logits.sum() + old_logits.sum()) * 0.0
+                    total_loss += distill_loss
 
         avg_loss = total_loss / len(router_logits_list)
         return {"loss_routing": avg_loss}

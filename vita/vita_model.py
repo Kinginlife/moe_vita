@@ -173,8 +173,7 @@ class Vita(nn.Module):
     def _generate_routing_targets_from_gt(self, frame_targets, BT):
         """
         Generate routing targets directly from GT labels (before matching).
-        All queries get background expert (0) by default.
-        After matching in Criterion, matched queries will use their GT class's expert.
+        Set valid_mask and target_expert_ids based on GT labels.
 
         Args:
             frame_targets: list of dicts with 'labels' [N]
@@ -187,8 +186,24 @@ class Vita(nn.Module):
 
         # Initialize all queries to expert 0 (background/base expert)
         target_expert_ids = torch.zeros(BT, num_queries, dtype=torch.long, device=device)
-        # No queries are valid initially (will be set in Criterion after matching)
         valid_mask = torch.zeros(BT, num_queries, dtype=torch.bool, device=device)
+
+        # Set routing targets based on GT labels for each frame
+        # Use vectorized operations to avoid conditional branches
+        for frame_idx, target in enumerate(frame_targets):
+            if frame_idx >= BT:
+                break
+            gt_labels = target['labels']  # [N]
+
+            for i, label in enumerate(gt_labels):
+                if i >= num_queries:
+                    break
+                label_val = label.item()
+                # Map label to expert (default to 0 if not found)
+                expert_id = self.class_to_expert.get(label_val, 0)
+                target_expert_ids[frame_idx, i] = expert_id
+                # Mark all as valid (routing loss will handle correctly)
+                valid_mask[frame_idx, i] = True
 
         # Get old_expert_mask from decoder's MoE layers
         old_expert_mask = 0

@@ -90,6 +90,17 @@ class Trainer(DefaultTrainer):
                 moe_layers = [layer for layer in decoder.transformer_ffn_layers
                              if hasattr(layer, 'moe')]
 
+                # Synchronize expert count across all processes
+                if len(moe_layers) > 0:
+                    current_num_experts = len(moe_layers[0].moe.experts)
+                    expected_num_experts = cfg.CONT.TASK + 1  # Task 0 -> 1 expert, Task 1 -> 2 experts, etc.
+
+                    # Broadcast from rank 0 to ensure consistency
+                    if comm.get_world_size() > 1:
+                        expert_count_tensor = torch.tensor([current_num_experts], dtype=torch.long, device='cuda' if torch.cuda.is_available() else 'cpu')
+                        torch.distributed.broadcast(expert_count_tensor, src=0)
+                        current_num_experts = expert_count_tensor.item()
+
                 for moe_layer_wrapper in moe_layers:
                     moe_layer = moe_layer_wrapper.moe
                     current_num_experts = len(moe_layer.experts)
@@ -104,13 +115,15 @@ class Trainer(DefaultTrainer):
                             dropout=0.0,
                             init_from=init_from
                         )
-                        logger.info(f"Task {cfg.CONT.TASK}: Added expert {current_num_experts} (total: {expected_num_experts})")
+                        if comm.is_main_process():
+                            logger.info(f"Task {cfg.CONT.TASK}: Added expert {current_num_experts} (total: {expected_num_experts})")
 
                     # Freeze old experts (exclude current task expert)
                     if cfg.MOE.FREEZE_OLD_EXPERTS and cfg.CONT.TASK > 0:
                         old_expert_ids = list(range(cfg.CONT.TASK))
                         moe_layer.freeze_experts(old_expert_ids)
-                        logger.info(f"Frozen old experts: {old_expert_ids}")
+                        if comm.is_main_process():
+                            logger.info(f"Frozen old experts: {old_expert_ids}")
             except AttributeError as e:
                 logger.error(f"MoE layer not found in model: {e}")
                 raise
@@ -417,10 +430,33 @@ def main(args):
         model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
         prev_task = cfg.CONT.TASK - 1
         proj_matrix_path = os.path.join(os.path.dirname(cfg.OUTPUT_DIR), f"step{prev_task}", f"projection_matrix_task{prev_task}.pt")
-        if os.path.exists(proj_matrix_path):
+
+        # Check file existence on main process and broadcast to all processes to avoid DDP deadlock
+        file_exists = os.path.exists(proj_matrix_path) if comm.is_main_process() else False
+        if comm.get_world_size() > 1:
+            file_exists_tensor = torch.tensor([file_exists], dtype=torch.bool, device=model.device)
+            torch.distributed.broadcast(file_exists_tensor, src=0)
+            file_exists = file_exists_tensor.item()
+
+        if file_exists:
             decoder = model.sem_seg_head.predictor
             moe_layers = [layer for layer in decoder.transformer_ffn_layers if hasattr(layer, 'moe')]
-            proj_matrix = torch.load(proj_matrix_path, map_location=model.device)
+
+            # Load projection matrix on main process first, then broadcast
+            if comm.is_main_process():
+                proj_matrix = torch.load(proj_matrix_path, map_location=model.device)
+            else:
+                # Create placeholder on other processes
+                if len(moe_layers) > 0:
+                    router_dim = moe_layers[0].moe.router.network[-1].weight.shape[1]
+                    proj_matrix = torch.zeros(router_dim, router_dim, device=model.device)
+                else:
+                    proj_matrix = None
+
+            # Broadcast projection matrix to all processes
+            if comm.get_world_size() > 1 and proj_matrix is not None:
+                torch.distributed.broadcast(proj_matrix, src=0)
+
             for moe_layer_wrapper in moe_layers:
                 moe_layer_wrapper.moe.router.set_projection_matrix(proj_matrix)
                 # 【关键补充】：重新把 Router 最后一层新专家的权重进行正交投影！

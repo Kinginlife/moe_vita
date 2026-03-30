@@ -53,10 +53,18 @@ class MoELayer(nn.Module):
 
             for expert_id in range(self.num_experts):
                 mask = expert_ids == expert_id  # [B, N]
-                if mask.any():
+                num_selected = mask.sum()
+
+                if num_selected > 0:
                     selected_x = x[mask]  # [num_selected, D]
                     expert_output = self.experts[expert_id](selected_x)
                     output[mask] = expert_output.to(x.dtype)
+                else:
+                    # Force expert to participate with dummy input to avoid DDP unused parameter error
+                    if self.training:
+                        dummy_x = x[:1].detach() * 0.0  # [1, D] zero tensor
+                        dummy_output = self.experts[expert_id](dummy_x) * 0.0
+                        output = output + dummy_output.sum() * 0.0
         else:
             # Top-K: weighted combination per query
             topk_weights, topk_indices = torch.topk(router_logits, actual_k, dim=-1)
@@ -65,7 +73,9 @@ class MoELayer(nn.Module):
             output = torch.zeros_like(x)
             for expert_id in range(self.num_experts):
                 mask = (topk_indices == expert_id).any(dim=-1)  # [B, N]
-                if mask.any():
+                num_selected = mask.sum()
+
+                if num_selected > 0:
                     selected_x = x[mask]
                     expert_output = self.experts[expert_id](selected_x).to(x.dtype)
 
@@ -76,6 +86,12 @@ class MoELayer(nn.Module):
                         for k_pos in k_positions:
                             weight = topk_weights[b, n, k_pos]
                             output[b, n] += weight * expert_output[idx]
+                else:
+                    # Force expert to participate with dummy input to avoid DDP unused parameter error
+                    if self.training:
+                        dummy_x = x[:1].detach() * 0.0
+                        dummy_output = self.experts[expert_id](dummy_x) * 0.0
+                        output = output + dummy_output.sum() * 0.0
 
         # Convert back to transformer format if needed
         if is_transformer_format:
@@ -131,9 +147,15 @@ class MoELayer(nn.Module):
             new_linear.weight.data[:old_num_experts] = old_weight
 
             # Initialize new expert's router weights with larger noise
+            # Use manual seed to ensure consistency across DDP processes
             if init_from is not None and init_from < old_num_experts:
-                new_linear.weight.data[old_num_experts] = old_weight[init_from] + torch.randn_like(old_weight[init_from]) * 0.5
+                # Set seed based on expert count to ensure reproducibility across processes
+                torch.manual_seed(42 + old_num_experts)
+                noise = torch.randn_like(old_weight[init_from]) * 0.5
+                new_linear.weight.data[old_num_experts] = old_weight[init_from] + noise
             else:
+                # Set seed for xavier initialization
+                torch.manual_seed(42 + old_num_experts)
                 nn.init.xavier_uniform_(new_linear.weight.data[old_num_experts:])
 
             # Project new weights to orthogonal subspace

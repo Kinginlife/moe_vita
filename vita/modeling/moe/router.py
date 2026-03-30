@@ -32,18 +32,24 @@ class Router(nn.Module):
     def _register_gradient_hook(self):
         """Register hook to apply OGP to new experts while keeping old expert routing intact."""
         def hook(grad):
+            if grad is None:
+                return grad
+
             if self.old_expert_mask > 0:
                 # Scale down old expert gradients (not freeze completely)
                 grad[:self.old_expert_mask] = grad[:self.old_expert_mask] * 0.1
 
                 # Apply orthogonal projection to new experts
-                if self.projection_matrix is not None:
-                    grad_new = grad[self.old_expert_mask:]  # [new_experts, router_dim]
+                if self.projection_matrix is not None and grad.size(0) > self.old_expert_mask:
+                    grad_new = grad[self.old_expert_mask:].clone()  # [new_experts, router_dim]
                     proj_matrix = self.projection_matrix.to(grad.device)
                     grad_new = torch.matmul(grad_new, proj_matrix)
                     grad[self.old_expert_mask:] = grad_new
             return grad
 
+        # Clear old hooks before registering new one (if they exist)
+        if hasattr(self.network[-1].weight, '_backward_hooks') and self.network[-1].weight._backward_hooks is not None:
+            self.network[-1].weight._backward_hooks.clear()
         self.network[-1].weight.register_hook(hook)
 
     def compute_projection_matrix(self, features, energy_threshold=0.7):
@@ -133,8 +139,9 @@ class Router(nn.Module):
         if routing_targets is not None:
             target_ids = routing_targets['target_expert_ids']
             valid_mask = routing_targets['valid_mask']
+            num_valid = valid_mask.sum()
 
-            if valid_mask.any():
+            if num_valid > 0:
                 valid_logits = router_logits[valid_mask]
                 valid_targets = target_ids[valid_mask]
 
@@ -147,20 +154,22 @@ class Router(nn.Module):
                     supervised_loss = F.cross_entropy(valid_logits / soft_temp, valid_targets)
 
             # 2. Negative supervision: prevent routing conflicts
-            if E > 1 and old_expert_mask > 0 and valid_mask.any():
+            if E > 1 and old_expert_mask > 0 and num_valid > 0:
                 valid_logits_all = router_logits[valid_mask]  # [num_valid, E]
                 valid_targets_all = target_ids[valid_mask]  # [num_valid]
 
                 # Prevent new task samples from routing to old experts
                 new_expert_samples = valid_targets_all >= old_expert_mask
-                if new_expert_samples.sum() > 0:
+                num_new_samples = new_expert_samples.sum()
+                if num_new_samples > 0:
                     old_expert_logits = valid_logits_all[new_expert_samples, :old_expert_mask]
                     suppress_new_to_old = -F.logsigmoid(-old_expert_logits).mean()
                     supervised_loss = supervised_loss + suppress_new_to_old * 0.5
 
                 # Prevent old task samples from routing to new experts
                 old_expert_samples = valid_targets_all < old_expert_mask
-                if old_expert_samples.sum() > 0:
+                num_old_samples = old_expert_samples.sum()
+                if num_old_samples > 0:
                     new_expert_logits = valid_logits_all[old_expert_samples, old_expert_mask:]
                     suppress_old_to_new = -F.logsigmoid(-new_expert_logits).mean()
                     supervised_loss = supervised_loss + suppress_old_to_new * 0.5
