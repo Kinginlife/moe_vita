@@ -257,7 +257,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, clip_mask_features, mask=None):
+    def forward(self, x, mask_features, clip_mask_features, mask=None, routing_targets=None):
         assert len(x) == self.num_feature_levels
         src = []
         pos = []
@@ -332,6 +332,10 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
         # Return router logits for loss computation in Criterion
         if router_logits_list:
             out['router_logits'] = router_logits_list  # List of [B, N, num_experts]
+
+        # Pass routing_targets if provided
+        if routing_targets is not None:
+            out['routing_targets'] = routing_targets
 
         num_layer = self.vita_last_layer_num if self.training else 1
         frame_queries = torch.stack(frame_queries[-num_layer:])

@@ -36,8 +36,10 @@ def collect_router_features(model, data_loader, num_samples=500):
 
     # Hook to capture router input
     router_inputs = []
+    # 【修改1】：改为后置 hook (forward_hook)，抓取 ReLU 的输出特征
     def hook_fn(module, input, output):
-        router_inputs.append(input[0].detach().cpu())
+        # 这里的 output 就是经过 Linear+ReLU 后的特征，形状已经是 [B*N, router_dim]
+        router_inputs.append(output.detach().cpu())
 
     # Register hook on router
     decoder = model.sem_seg_head.predictor
@@ -45,7 +47,8 @@ def collect_router_features(model, data_loader, num_samples=500):
     if len(moe_layers) == 0:
         raise ValueError("No MoE layers found!")
 
-    hook = moe_layers[0].moe.router.register_forward_hook(hook_fn)
+    # 【修改2】：将 Hook 注册到 network[1] (即 ReLU 层) 上！
+    hook = moe_layers[0].moe.router.network[1].register_forward_hook(hook_fn)
 
     with torch.no_grad():
         for idx, inputs in enumerate(tqdm(data_loader, desc="Collecting features", total=num_samples)):
@@ -66,8 +69,8 @@ def collect_router_features(model, data_loader, num_samples=500):
 
     hook.remove()
 
-    # Concatenate all captured features: [N, D]
-    all_features = torch.cat([f.flatten(0, 1) for f in router_inputs], dim=0)
+    # 【修改3】：因为 output 已经是 [B*N, D] 这种二维形状了，不需要 flatten(0, 1) 了，直接 cat 即可
+    all_features = torch.cat(router_inputs, dim=0)
     return all_features
 
 

@@ -423,6 +423,12 @@ def main(args):
             proj_matrix = torch.load(proj_matrix_path, map_location=model.device)
             for moe_layer_wrapper in moe_layers:
                 moe_layer_wrapper.moe.router.set_projection_matrix(proj_matrix)
+                # 【关键补充】：重新把 Router 最后一层新专家的权重进行正交投影！
+                old_num_experts = moe_layer_wrapper.moe.router.old_expert_mask
+                with torch.no_grad():
+                    new_weights = moe_layer_wrapper.moe.router.network[-1].weight.data[old_num_experts:]
+                    new_weights = torch.matmul(new_weights, proj_matrix.to(new_weights.device))
+                    moe_layer_wrapper.moe.router.network[-1].weight.data[old_num_experts:] = new_weights
             logger.info(f"Loaded projection matrix from {proj_matrix_path}")
         else:
             logger.warning(f"Projection matrix not found at {proj_matrix_path}")

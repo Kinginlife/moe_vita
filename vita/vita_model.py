@@ -409,13 +409,13 @@ class Vita(nn.Module):
         # Prepare targets first
         frame_targets, clip_targets = self.prepare_targets(batched_inputs, images)
 
-        # Forward pass
-        outputs, frame_queries, mask_features = self.sem_seg_head(features)
-
         # Generate routing targets from GT labels for MoE supervision
+        routing_targets = None
         if self.class_to_expert is not None and self.training:
             routing_targets = self._generate_routing_targets_from_gt(frame_targets, BT)
-            outputs['routing_targets'] = routing_targets
+
+        # Forward pass with routing_targets
+        outputs, frame_queries, mask_features = self.sem_seg_head(features, routing_targets=routing_targets)
 
         # Compute losses (including routing loss in criterion)
         losses, fg_indices = self.criterion(outputs, frame_targets)

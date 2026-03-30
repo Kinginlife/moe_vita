@@ -362,7 +362,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, clip_mask_features, mask = None):
+    def forward(self, x, mask_features, clip_mask_features, mask=None, routing_targets=None):
         # x is a list of multi-scale feature
         assert len(x) == self.num_feature_levels
         src = []
