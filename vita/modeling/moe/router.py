@@ -32,17 +32,12 @@ class Router(nn.Module):
         self.network[-1].weight.register_hook(hook)
         
 
-    def forward(self, x, routing_targets=None):
+    def forward(self, x):
         """
         Args:
             x: [B, N, d_model] or [N, B, d_model] (transformer format)
-            routing_targets: dict with keys:
-                - 'target_expert_ids': [B, N] target expert for each query
-                - 'valid_mask': [B, N] whether to supervise each query
-                or None (inference mode)
         Returns:
             router_logits: [B, N, num_experts] (query-level routing)
-            routing_loss: scalar or None
         """
         # Handle transformer format [N, B, D] -> [B, N, D]
         if x.dim() == 3 and x.size(1) < x.size(0):
@@ -62,19 +57,19 @@ class Router(nn.Module):
         router_logits = F.linear(f_norm, w_norm) * 20.0
         router_logits = router_logits.reshape(B, N, self.num_experts)  # [B, N, num_experts]
 
-        routing_loss = None
-        if self.training:
-            routing_loss = self._compute_routing_loss(router_logits, routing_targets)
+        return router_logits
 
-        return router_logits, routing_loss
-
-    def _compute_routing_loss(self, router_logits, routing_targets):
+    @staticmethod
+    def compute_routing_loss(router_logits, routing_targets, soft_temp=2.0):
         """
-        Compute routing loss = supervised loss + entropy regularization
+        Static method to compute routing loss (called from Criterion).
 
         Args:
             router_logits: [B, N, num_experts]
-            routing_targets: dict or None
+            routing_targets: dict with 'target_expert_ids' [B, N] and 'valid_mask' [B, N]
+            soft_temp: temperature for soft routing
+        Returns:
+            total_loss: scalar
         """
         B, N, E = router_logits.shape
 
@@ -82,30 +77,23 @@ class Router(nn.Module):
 
         # 1. Supervised loss (only for positive samples)
         if routing_targets is not None:
-            target_ids = routing_targets['target_expert_ids']  # [B, N]
-            valid_mask = routing_targets['valid_mask']          # [B, N]
+            target_ids = routing_targets['target_expert_ids']
+            valid_mask = routing_targets['valid_mask']
 
             if valid_mask.any():
-                # Extract queries that need supervision
-                valid_logits = router_logits[valid_mask]  # [M, E]
-                valid_targets = target_ids[valid_mask]     # [M]
+                valid_logits = router_logits[valid_mask]
+                valid_targets = target_ids[valid_mask]
 
-                # Generate soft labels (label smoothing)
+                # Soft labels with label smoothing
                 target_probs = F.one_hot(valid_targets, E).float()
-                target_probs = target_probs * 0.9 + 0.1 / E  # [M, E]
+                target_probs = target_probs * 0.9 + 0.1 / E
 
-                # KL divergence
-                log_probs = F.log_softmax(valid_logits / self.soft_temp, dim=-1)
-                supervised_loss = F.kl_div(
-                    log_probs, target_probs, reduction='batchmean'
-                )
+                log_probs = F.log_softmax(valid_logits / soft_temp, dim=-1)
+                supervised_loss = F.kl_div(log_probs, target_probs, reduction='batchmean')
 
-        # 2. Entropy regularization (for all queries, including background)
-        router_probs = F.softmax(router_logits, dim=-1)  # [B, N, E]
+        # 2. Entropy regularization
+        router_probs = F.softmax(router_logits, dim=-1)
         entropy = -(router_probs * torch.log(router_probs + 1e-8)).sum(dim=-1)
-        entropy_loss = -entropy.mean() * 0.01  # Negative: maximize entropy
+        entropy_loss = -entropy.mean() * 0.01
 
-        # 3. Total loss
-        total_loss = supervised_loss + entropy_loss
-
-        return total_loss
+        return supervised_loss + entropy_loss

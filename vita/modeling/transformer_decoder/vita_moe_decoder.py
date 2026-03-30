@@ -36,22 +36,22 @@ class MoEFFNLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.normalize_before = normalize_before
 
-    def forward_post(self, tgt, routing_targets=None):
-        tgt2, routing_loss = self.moe(tgt, routing_targets)
+    def forward_post(self, tgt):
+        tgt2, router_logits = self.moe(tgt)
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
-        return tgt, routing_loss
+        return tgt, router_logits
 
-    def forward_pre(self, tgt, routing_targets=None):
+    def forward_pre(self, tgt):
         tgt2 = self.norm(tgt)
-        tgt2, routing_loss = self.moe(tgt2, routing_targets)
+        tgt2, router_logits = self.moe(tgt2)
         tgt = tgt + self.dropout(tgt2)
-        return tgt, routing_loss
+        return tgt, router_logits
 
-    def forward(self, tgt, routing_targets=None):
+    def forward(self, tgt):
         if self.normalize_before:
-            return self.forward_pre(tgt, routing_targets)
-        return self.forward_post(tgt, routing_targets)
+            return self.forward_pre(tgt)
+        return self.forward_post(tgt)
 
 
 @TRANSFORMER_DECODER_REGISTRY.register()
@@ -232,7 +232,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
 
         return ret
 
-    def forward(self, x, mask_features, clip_mask_features, mask=None, routing_targets=None):
+    def forward(self, x, mask_features, clip_mask_features, mask=None):
         assert len(x) == self.num_feature_levels
         src = []
         pos = []
@@ -255,7 +255,7 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
         frame_queries = []
         predictions_class = []
         predictions_mask = []
-        routing_losses = []
+        router_logits_list = []  # Collect router logits from all MoE layers
 
         outputs_class, outputs_mask, attn_mask, frame_query = self.forward_prediction_heads(
             output, mask_features, attn_mask_target_size=size_list[0]
@@ -282,9 +282,8 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
 
             # FFN: check if this layer uses MoE
             if isinstance(self.transformer_ffn_layers[i], MoEFFNLayer):
-                output, routing_loss = self.transformer_ffn_layers[i](output, routing_targets)
-                if routing_loss is not None:
-                    routing_losses.append(routing_loss)
+                output, router_logits = self.transformer_ffn_layers[i](output)
+                router_logits_list.append(router_logits)
             else:
                 output = self.transformer_ffn_layers[i](output)
 
@@ -305,8 +304,9 @@ class VitaMoEMultiScaleMaskedTransformerDecoder(nn.Module):
             )
         }
 
-        if routing_losses:
-            out['routing_loss'] = sum(routing_losses) / len(routing_losses)
+        # Return router logits for loss computation in Criterion
+        if router_logits_list:
+            out['router_logits'] = router_logits_list  # List of [B, N, num_experts]
 
         num_layer = self.vita_last_layer_num if self.training else 1
         frame_queries = torch.stack(frame_queries[-num_layer:])

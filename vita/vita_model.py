@@ -144,6 +144,32 @@ class Vita(nn.Module):
 
         return mapping
 
+    def _generate_routing_targets_from_gt(self, frame_targets, BT):
+        """
+        Generate routing targets directly from GT labels (before matching).
+        All queries get background expert (0) by default.
+        After matching in Criterion, matched queries will use their GT class's expert.
+
+        Args:
+            frame_targets: list of dicts with 'labels' [N]
+            BT: batch_size * num_frames
+        Returns:
+            routing_targets: dict with 'target_expert_ids' and 'valid_mask'
+        """
+        device = self.device
+        num_queries = self.num_queries
+
+        # Initialize all queries to expert 0 (background/base expert)
+        target_expert_ids = torch.zeros(BT, num_queries, dtype=torch.long, device=device)
+        # No queries are valid initially (will be set in Criterion after matching)
+        valid_mask = torch.zeros(BT, num_queries, dtype=torch.bool, device=device)
+
+        return {
+            'target_expert_ids': target_expert_ids,
+            'valid_mask': valid_mask,
+            'class_to_expert': self.class_to_expert,  # Pass mapping to Criterion
+        }
+
     def _generate_routing_targets_from_matching(self, frame_targets, fg_indices, BT):
         """
         Generate routing targets based on matching results from Criterion.
@@ -265,15 +291,17 @@ class Vita(nn.Module):
             vita_losses.append("fg_sim")
 
         vita_criterion = VitaSetCriterion(
-            num_classes, 
-            matcher=vita_matcher, 
+            num_classes,
+            matcher=vita_matcher,
             weight_dict=vita_weight_dict,
             eos_coef=cfg.MODEL.VITA.NO_OBJECT_WEIGHT,
-            losses=vita_losses, 
+            losses=vita_losses,
             num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
             oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
             importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
             sim_use_clip=cfg.MODEL.VITA.SIM_USE_CLIP,
+            moe_enabled=cfg.MOE.ENABLED,
+            moe_soft_temp=cfg.MOE.SOFT_ROUTING_TEMP,
         )
 
         return {
@@ -355,29 +383,16 @@ class Vita(nn.Module):
         # Prepare targets first
         frame_targets, clip_targets = self.prepare_targets(batched_inputs, images)
 
-        # First forward without routing targets to get predictions
-        outputs, frame_queries, mask_features = self.sem_seg_head(
-            features, routing_targets=None
-        )
+        # Forward pass
+        outputs, frame_queries, mask_features = self.sem_seg_head(features)
 
-        # Perform matching to get query-to-GT correspondence
+        # Generate routing targets from GT labels for MoE supervision
+        if self.class_to_expert is not None and self.training:
+            routing_targets = self._generate_routing_targets_from_gt(frame_targets, BT)
+            outputs['routing_targets'] = routing_targets
+
+        # Compute losses (including routing loss in criterion)
         losses, fg_indices = self.criterion(outputs, frame_targets)
-
-        # Generate routing targets based on matching results
-        routing_targets = None
-        if self.class_to_expert is not None:
-            routing_targets = self._generate_routing_targets_from_matching(
-                frame_targets, fg_indices, BT
-            )
-
-        # Second forward with routing targets to compute routing loss
-        if routing_targets is not None:
-            outputs_with_routing, _, _ = self.sem_seg_head(
-                features, routing_targets=routing_targets
-            )
-            # Extract routing loss
-            if 'routing_loss' in outputs_with_routing:
-                losses['loss_routing'] = outputs_with_routing['routing_loss']
 
         mask_features = self.vita_module.vita_mask_features(mask_features)
         mask_features = mask_features.view(B, self.num_frames, *mask_features.shape[-3:])

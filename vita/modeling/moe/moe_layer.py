@@ -24,14 +24,13 @@ class MoELayer(nn.Module):
         # Router network
         self.router = Router(d_model, num_experts, router_dim, soft_temp)
 
-    def forward(self, x, routing_targets=None):
+    def forward(self, x):
         """
         Args:
             x: [N, B, d_model] (transformer format) or [B, N, d_model]
-            routing_targets: dict with routing supervision info or None
         Returns:
             output: same shape as x
-            routing_loss: scalar or None
+            router_logits: [B, N, num_experts] for loss computation
         """
         # Handle transformer format [N, B, D] -> [B, N, D]
         is_transformer_format = False
@@ -42,7 +41,7 @@ class MoELayer(nn.Module):
         B, N, D = x.shape
 
         # Get query-level routing logits [B, N, num_experts]
-        router_logits, routing_loss = self.router(x, routing_targets)
+        router_logits = self.router(x)
 
         # Top-K routing: Top-2 for training, Top-1 for inference
         if self.training:
@@ -94,7 +93,7 @@ class MoELayer(nn.Module):
                         dummy_add = dummy_add + param.sum() * 0.0
             output = output + dummy_add
 
-        return output, routing_loss
+        return output, router_logits
 
     def freeze_experts(self, expert_ids):
         """Freeze specified experts."""

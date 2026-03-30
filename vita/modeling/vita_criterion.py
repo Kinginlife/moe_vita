@@ -88,7 +88,8 @@ class VitaSetCriterion(nn.Module):
     """
 
     def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses,
-                 num_points, oversample_ratio, importance_sample_ratio, sim_use_clip):
+                 num_points, oversample_ratio, importance_sample_ratio, sim_use_clip,
+                 moe_enabled=False, moe_soft_temp=2.0):
         """Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -96,6 +97,8 @@ class VitaSetCriterion(nn.Module):
             weight_dict: dict containing as key the names of the losses and as values their relative weight.
             eos_coef: relative classification weight applied to the no-object category
             losses: list of all the losses to be applied. See get_loss for list of available losses.
+            moe_enabled: whether MoE is enabled
+            moe_soft_temp: temperature for soft routing supervision
         """
         super().__init__()
         self.num_classes = num_classes
@@ -112,6 +115,10 @@ class VitaSetCriterion(nn.Module):
         self.oversample_ratio = oversample_ratio
         self.importance_sample_ratio = importance_sample_ratio
         self.sim_use_clip = sim_use_clip
+
+        # MoE parameters
+        self.moe_enabled = moe_enabled
+        self.moe_soft_temp = moe_soft_temp
 
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
@@ -246,6 +253,59 @@ class VitaSetCriterion(nn.Module):
 
         return {"loss_vita_sim": loss_clip_sim}
 
+    def loss_routing(self, outputs, clip_targets, clip_indices, num_masks):
+        """
+        Compute MoE routing loss from collected router logits.
+
+        Args:
+            outputs: dict with 'router_logits' and 'routing_targets'
+            clip_targets: list of target dicts with 'labels'
+            clip_indices: matching indices from matcher
+            num_masks: normalization factor
+        """
+        if 'router_logits' not in outputs or not self.moe_enabled:
+            return {}
+
+        if 'routing_targets' not in outputs:
+            return {}
+
+        from ..moe.router import Router
+
+        router_logits_list = outputs['router_logits']  # List of [B, N, num_experts]
+        routing_targets = outputs['routing_targets']
+        class_to_expert = routing_targets.get('class_to_expert', {})
+
+        # Fill in valid routing targets based on matching results
+        target_expert_ids = routing_targets['target_expert_ids']  # [B, N]
+        valid_mask = routing_targets['valid_mask']  # [B, N]
+
+        # Update routing targets based on matched queries
+        for batch_idx, (pred_idx, tgt_idx) in enumerate(clip_indices):
+            if batch_idx >= target_expert_ids.size(0):
+                break
+
+            gt_labels = clip_targets[batch_idx]['labels'][tgt_idx]
+
+            for query_idx, gt_label in zip(pred_idx, gt_labels):
+                label_val = gt_label.item()
+                if label_val in class_to_expert:
+                    expert_id = class_to_expert[label_val]
+                    target_expert_ids[batch_idx, query_idx] = expert_id
+                    valid_mask[batch_idx, query_idx] = True
+
+        # Compute loss for each layer and average
+        total_loss = 0.0
+        for router_logits in router_logits_list:
+            loss = Router.compute_routing_loss(
+                router_logits,
+                {'target_expert_ids': target_expert_ids, 'valid_mask': valid_mask},
+                self.moe_soft_temp
+            )
+            total_loss += loss
+
+        avg_loss = total_loss / len(router_logits_list)
+        return {"loss_routing": avg_loss}
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -303,9 +363,11 @@ class VitaSetCriterion(nn.Module):
                 )
             )
 
-        # Add MoE routing loss if present
-        if "routing_loss" in outputs:
-            losses["loss_routing"] = outputs["routing_loss"]
+        # Compute MoE routing loss if enabled
+        if self.moe_enabled and 'router_logits' in outputs:
+            losses.update(
+                self.loss_routing(outputs, clip_targets, clip_indices, num_masks)
+            )
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
