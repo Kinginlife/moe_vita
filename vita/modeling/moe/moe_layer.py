@@ -130,9 +130,9 @@ class MoELayer(nn.Module):
         with torch.no_grad():
             new_linear.weight.data[:old_num_experts] = old_weight
 
-            # Initialize new expert's router weights
+            # Initialize new expert's router weights with larger noise
             if init_from is not None and init_from < old_num_experts:
-                new_linear.weight.data[old_num_experts] = old_weight[init_from] + torch.randn_like(old_weight[init_from]) * noise_scale
+                new_linear.weight.data[old_num_experts] = old_weight[init_from] + torch.randn_like(old_weight[init_from]) * 0.5
             else:
                 nn.init.xavier_uniform_(new_linear.weight.data[old_num_experts:])
 

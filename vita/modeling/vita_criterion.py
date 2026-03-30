@@ -305,11 +305,13 @@ class VitaSetCriterion(nn.Module):
 
         # Compute supervised loss
         total_loss = 0.0
+        old_expert_mask = routing_targets.get('old_expert_mask', 0)
         for router_logits in router_logits_list:
             loss = Router.compute_routing_loss(
                 router_logits,
                 {'target_expert_ids': target_expert_ids, 'valid_mask': valid_mask},
-                self.moe_soft_temp
+                self.moe_soft_temp,
+                old_expert_mask
             )
             total_loss += loss
 

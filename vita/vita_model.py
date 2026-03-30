@@ -190,10 +190,21 @@ class Vita(nn.Module):
         # No queries are valid initially (will be set in Criterion after matching)
         valid_mask = torch.zeros(BT, num_queries, dtype=torch.bool, device=device)
 
+        # Get old_expert_mask from decoder's MoE layers
+        old_expert_mask = 0
+        if hasattr(self.sem_seg_head, 'predictor') and hasattr(self.sem_seg_head.predictor, 'transformer'):
+            transformer = self.sem_seg_head.predictor.transformer
+            if hasattr(transformer, 'decoder') and hasattr(transformer.decoder, 'layers'):
+                for layer in transformer.decoder.layers:
+                    if hasattr(layer, 'moe') and hasattr(layer.moe, 'router'):
+                        old_expert_mask = layer.moe.router.old_expert_mask
+                        break
+
         return {
             'target_expert_ids': target_expert_ids,
             'valid_mask': valid_mask,
-            'class_to_expert': self.class_to_expert,  # Pass mapping to Criterion
+            'class_to_expert': self.class_to_expert,
+            'old_expert_mask': old_expert_mask,
         }
 
     def _generate_routing_targets_from_matching(self, frame_targets, fg_indices, BT):

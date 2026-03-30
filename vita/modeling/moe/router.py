@@ -21,22 +21,24 @@ class Router(nn.Module):
         )
         self.old_expert_mask = 0  # Number of old experts to freeze
 
+        # Learnable temperature for cosine similarity scaling
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(5.0)))
+
         # Store projection matrix P = I - UU^T for OGP
         self.register_buffer('projection_matrix', None)
 
         self._register_gradient_hook()
 
     def _register_gradient_hook(self):
-        """Register hook to freeze old experts and apply OGP to new experts."""
+        """Register hook to apply OGP to new experts while keeping old expert routing intact."""
         def hook(grad):
             if self.old_expert_mask > 0:
-                # Freeze old experts completely
-                grad[:self.old_expert_mask] = 0
+                # Scale down old expert gradients (not freeze completely)
+                grad[:self.old_expert_mask] = grad[:self.old_expert_mask] * 0.1
 
                 # Apply orthogonal projection to new experts
                 if self.projection_matrix is not None:
                     grad_new = grad[self.old_expert_mask:]  # [new_experts, router_dim]
-                    # Ensure projection matrix is on same device as gradient
                     proj_matrix = self.projection_matrix.to(grad.device)
                     grad_new = torch.matmul(grad_new, proj_matrix)
                     grad[self.old_expert_mask:] = grad_new
@@ -44,13 +46,13 @@ class Router(nn.Module):
 
         self.network[-1].weight.register_hook(hook)
 
-    def compute_projection_matrix(self, features, energy_threshold=0.95):
+    def compute_projection_matrix(self, features, energy_threshold=0.7):
         """
         Compute orthogonal projection matrix P = I - UU^T from old task features.
 
         Args:
             features: [N, D] tensor of old task features (router input)
-            energy_threshold: retain this fraction of energy (default 0.95)
+            energy_threshold: retain this fraction of energy (default 0.85, lower = less restrictive)
         """
         device = features.device
         D = features.shape[1]
@@ -96,20 +98,22 @@ class Router(nn.Module):
         B, N, D = x.shape
         x_flat = x.reshape(B * N, D)  # [B*N, D]
 
-        # Cosine similarity routing
+        # Cosine similarity routing with learnable temperature
         features = self.network[:-1](x_flat)  # [B*N, router_dim]
         last_weight = self.network[-1].weight  # [num_experts, router_dim]
 
         f_norm = F.normalize(features, p=2, dim=-1)
         w_norm = F.normalize(last_weight, p=2, dim=-1)
 
-        router_logits = F.linear(f_norm, w_norm) * 20.0
+        # Use learnable temperature (clamped to [1, 20])
+        temperature = torch.clamp(torch.exp(self.log_temperature), 1.0, 20.0)
+        router_logits = F.linear(f_norm, w_norm) * temperature
         router_logits = router_logits.reshape(B, N, self.num_experts)  # [B, N, num_experts]
 
         return router_logits
 
     @staticmethod
-    def compute_routing_loss(router_logits, routing_targets, soft_temp=2.0):
+    def compute_routing_loss(router_logits, routing_targets, soft_temp=2.0, old_expert_mask=0):
         """
         Static method to compute routing loss (called from Criterion).
 
@@ -117,6 +121,7 @@ class Router(nn.Module):
             router_logits: [B, N, num_experts]
             routing_targets: dict with 'target_expert_ids' [B, N] and 'valid_mask' [B, N]
             soft_temp: temperature for soft routing
+            old_expert_mask: number of old experts (for incremental learning)
         Returns:
             total_loss: scalar
         """
@@ -135,12 +140,29 @@ class Router(nn.Module):
 
                 # Special handling for single expert (Task 0)
                 if E == 1:
-                    # Use L2 loss to push logits towards a positive value
-                    # This ensures router learns meaningful features even with 1 expert
                     target_logits = torch.ones_like(valid_logits) * 5.0
                     supervised_loss = F.mse_loss(valid_logits, target_logits)
                 else:
                     # Multi-expert: use cross-entropy
                     supervised_loss = F.cross_entropy(valid_logits / soft_temp, valid_targets)
+
+            # 2. Negative supervision: prevent routing conflicts
+            if E > 1 and old_expert_mask > 0 and valid_mask.any():
+                valid_logits_all = router_logits[valid_mask]  # [num_valid, E]
+                valid_targets_all = target_ids[valid_mask]  # [num_valid]
+
+                # Prevent new task samples from routing to old experts
+                new_expert_samples = valid_targets_all >= old_expert_mask
+                if new_expert_samples.any():
+                    old_expert_logits = valid_logits_all[new_expert_samples, :old_expert_mask]
+                    suppress_new_to_old = -F.logsigmoid(-old_expert_logits).mean()
+                    supervised_loss = supervised_loss + suppress_new_to_old * 0.5
+
+                # Prevent old task samples from routing to new experts
+                old_expert_samples = valid_targets_all < old_expert_mask
+                if old_expert_samples.any():
+                    new_expert_logits = valid_logits_all[old_expert_samples, old_expert_mask:]
+                    suppress_old_to_new = -F.logsigmoid(-new_expert_logits).mean()
+                    supervised_loss = supervised_loss + suppress_old_to_new * 0.5
 
         return supervised_loss
