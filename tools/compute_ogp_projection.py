@@ -122,20 +122,28 @@ def main():
     router = moe_layers[0].moe.router
 
     # Load previous projection matrix if exists (for cumulative protection)
-    prev_proj_path = os.path.join(args.output_dir, f"projection_matrix_task{args.task-1}.pt") if args.task > 0 else None
+    # === 修改后的代码：正确寻找上一个 Task 的文件夹 ===
+    if args.task > 0:
+        output_base = os.path.dirname(args.output_dir) # 退回到 output/ytvis_2019_moe_hvpl
+        prev_task = args.task - 1
+        prev_proj_path = os.path.join(output_base, f"step{prev_task}", f"projection_matrix_task{prev_task}.pt")
+    else:
+        prev_proj_path = None
+
     if prev_proj_path and os.path.exists(prev_proj_path):
         print(f"Loading previous projection matrix from {prev_proj_path}")
         prev_proj = torch.load(prev_proj_path, map_location=model.device)
         # Apply previous projection to current features to get orthogonal component
-        features = torch.matmul(features.to(model.device), prev_proj).cpu()
+        features = torch.matmul(features.to(model.device), prev_proj)
         print("Applied previous projection to current features")
-
+        
     router.compute_projection_matrix(features.to(model.device), args.energy_threshold)
 
     # Combine with previous projection if exists
     if prev_proj_path and os.path.exists(prev_proj_path):
         # P_new = P_prev @ P_current (chain projections)
-        router.projection_matrix = torch.matmul(prev_proj, router.projection_matrix)
+        # 确保两者在同一个 device 上进行矩阵乘法
+        router.projection_matrix = torch.matmul(prev_proj.to(model.device), router.projection_matrix.to(model.device))
         print("Combined with previous projection matrix")
 
     # Save projection matrix

@@ -132,15 +132,19 @@ class MoELayer(nn.Module):
         # Copy old weights and FREEZE them
         with torch.no_grad():
             new_linear.weight.data[:old_num_experts] = old_weight
-            
 
             # Initialize new expert's router weights
             if init_from is not None and init_from < old_num_experts:
                 new_linear.weight.data[old_num_experts] = old_weight[init_from] + torch.randn_like(old_weight[init_from]) * noise_scale
-                
             else:
                 nn.init.xavier_uniform_(new_linear.weight.data[old_num_experts:])
-                
+
+            # Project new weights to orthogonal subspace
+            if self.router.projection_matrix is not None:
+                new_weights = new_linear.weight.data[old_num_experts:]  # [new_experts, D]
+                proj_matrix = self.router.projection_matrix.to(new_weights.device)
+                new_weights = torch.matmul(new_weights, proj_matrix)
+                new_linear.weight.data[old_num_experts:] = new_weights
 
         self.router.network[-1] = new_linear
 
